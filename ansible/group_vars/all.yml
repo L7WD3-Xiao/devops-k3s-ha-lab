@@ -28,6 +28,7 @@ base_packages:
   - gnupg
   - software-properties-common
   - ca-certificates
+  - python3-passlib    # required by Ansible password_hash filter
 
 # Sysctl parameters for K3s
 sysctl_k3s_config:

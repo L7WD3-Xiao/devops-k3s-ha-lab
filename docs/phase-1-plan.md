@@ -414,6 +414,116 @@ ansible-playbook -i inventory.ini playbooks/00-init-system.yml
 
 ---
 
+## 快速执行流程（修正版）
+
+> 以下流程已修正引导问题（openssh-server 安装、IP 别名 service、sshd 配置前置到 02-init-node.sh，新增 03-post-restart.sh 处理重启后引导）。
+
+### Step 0: Windows 侧准备
+
+```powershell
+# 在 PowerShell 中执行
+
+# 1. 确认 WSL2 可用
+wsl --status
+wsl --set-default-version 2
+
+# 2. 如果没有 Ubuntu-22.04，安装一个
+wsl --install -d Ubuntu-22.04
+# 启动一次完成初始用户设置，然后关闭
+
+# 3. 创建 .wslconfig 关闭 swap（K3s 要求）
+# 路径: C:\Users\<你的用户名>\.wslconfig
+@"
+[wsl2]
+swap=0
+memory=8GB
+processors=4
+"@ | Out-File -FilePath "$env:USERPROFILE\.wslconfig" -Encoding utf8
+```
+
+### Step 1: 创建 3 个 WSL 实例
+
+```powershell
+# 在 PowerShell 中执行
+cd D:\Study\Note\project\k8s
+.\scripts\01-create-distros.ps1
+```
+
+### Step 2: 初始化各节点（WSL 重启前）
+
+```powershell
+# 在 PowerShell 中逐个执行
+wsl -d k3s-node-01 -- bash /mnt/d/Study/Note/project/k8s/scripts/02-init-node.sh node-01 192.168.50.11
+wsl -d k3s-node-02 -- bash /mnt/d/Study/Note/project/k8s/scripts/02-init-node.sh node-02 192.168.50.12
+wsl -d k3s-node-03 -- bash /mnt/d/Study/Note/project/k8s/scripts/02-init-node.sh node-03 192.168.50.13
+```
+
+### Step 3: 重启 WSL 使 systemd 生效
+
+```powershell
+wsl --shutdown
+# 等待 5 秒后重新进入
+```
+
+### Step 4: 重启后引导（启动服务 + SSH 密钥）
+
+```powershell
+# 逐个进入并运行引导脚本
+wsl -d k3s-node-01 -- bash /mnt/d/Study/Note/project/k8s/scripts/03-post-restart.sh node-01 192.168.50.11
+wsl -d k3s-node-02 -- bash /mnt/d/Study/Note/project/k8s/scripts/03-post-restart.sh node-02 192.168.50.12
+wsl -d k3s-node-03 -- bash /mnt/d/Study/Note/project/k8s/scripts/03-post-restart.sh node-03 192.168.50.13
+```
+
+### Step 5: 分发 SSH 密钥（在 node-01 中）
+
+```powershell
+wsl -d k3s-node-01
+```
+
+```bash
+# 切换到 ops 用户
+su - ops
+
+# 分发公钥到三个节点（密码: ops123）
+ssh-copy-id ops@192.168.50.11
+ssh-copy-id ops@192.168.50.12
+ssh-copy-id ops@192.168.50.13
+
+# 验证免密
+ssh ops@192.168.50.12 hostname  # 应返回 node-02
+ssh ops@192.168.50.13 hostname  # 应返回 node-03
+```
+
+### Step 6: 安装 Ansible 并运行 Playbook
+
+```bash
+# 仍在 node-01 的 ops 用户下
+pip3 install ansible
+
+# 运行基础初始化
+cd /mnt/d/Study/Note/project/k8s/ansible
+ansible-playbook -i inventory.ini playbooks/00-init-system.yml
+```
+
+### Step 7: 验证
+
+```bash
+# 在 node-01 的 ops 用户下
+cd /mnt/d/Study/Note/project/k8s/ansible
+
+# Ansible 连通性测试
+ansible all -i inventory.ini -m ping
+
+# 逐项验证
+ansible all -i inventory.ini -m command -a "hostname"
+ansible all -i inventory.ini -m command -a "free -h"
+ansible all -i inventory.ini -m command -a "ip addr show eth0"
+ansible all -i inventory.ini -m command -a "sysctl net.ipv4.ip_forward"
+ansible all -i inventory.ini -m command -a "timedatectl"
+```
+
+---
+
 ## 下一步
 
 Phase 1 完成后，进入 **Phase 2: K3s 集群部署**——使用 Ansible Playbook 在 3 节点上部署 K3s HA 集群（embedded etcd）。

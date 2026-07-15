@@ -26,7 +26,7 @@
 
     - name: Disable swap immediately
       shell: swapoff -a
-      when: ansible_swaptotal_mb > 0
+      when: ansible_facts.swaptotal_mb > 0
       changed_when: false
 
     - name: Remove swap from fstab

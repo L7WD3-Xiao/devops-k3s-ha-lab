@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$BaseDistro = "Ubuntu-22.04"
+$BaseDistro = "Ubuntu"
 $StoragePath = "D:\WSL\k3s-cluster"
 $TarballPath = "$StoragePath\ubuntu-base.tar"
 
@@ -19,9 +19,9 @@ Write-Host "=== K3s Cluster WSL2 Distro Creation ===" -ForegroundColor Cyan
 # Check if base distro exists
 $distroList = wsl -l -q
 if ($distroList -notcontains $BaseDistro) {
-    Write-Host "Base distro $BaseDistro not found. Installing..." -ForegroundColor Yellow
-    wsl --install -d Ubuntu-22.04 --no-launch
-    Write-Host "Please complete the initial setup of $BaseDistro, then re-run this script." -ForegroundColor Yellow
+    Write-Host "Base distro $BaseDistro not found. Please install Ubuntu first:" -ForegroundColor Yellow
+    Write-Host "  wsl --install -d Ubuntu --no-launch" -ForegroundColor White
+    Write-Host "Then complete initial setup and re-run this script." -ForegroundColor Yellow
     exit 1
 }
 
