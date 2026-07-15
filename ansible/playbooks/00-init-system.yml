@@ -1,0 +1,174 @@
+---
+# 00-init-system.yml
+# Base system initialization for all K3s cluster nodes
+# Run: ansible-playbook -i inventory.ini playbooks/00-init-system.yml
+
+- name: Initialize all K3s cluster nodes
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: true
+
+    - name: Install base packages
+      apt:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Disable swap immediately
+      shell: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: false
+
+    - name: Remove swap from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '\sswap\s'
+        state: absent
+
+    - name: Configure sysctl for K3s
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop: "{{ sysctl_k3s_config }}"
+      ignore_errors: true  # br_netfilter may not be available in WSL2 kernel
+
+    - name: Ensure br_netfilter module is loaded
+      modprobe:
+        name: br_netfilter
+        state: present
+      ignore_errors: true
+
+    - name: Configure /etc/hosts
+      copy:
+        dest: /etc/hosts
+        content: |
+          127.0.0.1   localhost
+          {% for host in cluster_hosts %}
+          {{ host.ip }}  {{ host.hostname }}
+          {% endfor %}
+
+    - name: Set timezone
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Ensure chrony is running and enabled
+      service:
+        name: chrony
+        state: started
+        enabled: true
+
+    - name: Create ops user
+      user:
+        name: "{{ ops_user }}"
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+
+    - name: Set ops password
+      user:
+        name: "{{ ops_user }}"
+        password: "{{ ops_password }}"
+
+    - name: Allow ops passwordless sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ ops_user }}"
+        content: "{{ ops_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Create .ssh directory for ops user
+      file:
+        path: "/home/{{ ops_user }}/.ssh"
+        state: directory
+        owner: "{{ ops_user }}"
+        group: "{{ ops_user }}"
+        mode: '0700'
+
+    - name: Configure sshd to listen on node IP
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ListenAddress'
+        line: "ListenAddress {{ node_ips[inventory_hostname] }}"
+        state: present
+      notify: restart sshd
+
+    - name: Ensure sshd is running and enabled
+      service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Create WSL2 IP alias systemd service
+      copy:
+        dest: /etc/systemd/system/wsl-ip-alias.service
+        content: |
+          [Unit]
+          Description=WSL2 IP Alias for K3s node
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/sbin/ip addr add {{ node_ips[inventory_hostname] }}/24 dev eth0
+          ExecStop=/sbin/ip addr del {{ node_ips[inventory_hostname] }}/24 dev eth0
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: enable wsl-ip-alias
+
+    - name: Start WSL2 IP alias service
+      systemd:
+        name: wsl-ip-alias
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: ssh
+        state: restarted
+
+    - name: enable wsl-ip-alias
+      systemd:
+        name: wsl-ip-alias
+        enabled: true
+        daemon_reload: true
+
+  post_tasks:
+    - name: Verify swap is disabled
+      command: free -h
+      register: free_output
+      changed_when: false
+
+    - name: Show memory info
+      debug:
+        var: free_output.stdout_lines
+
+    - name: Verify IP alias
+      command: ip addr show eth0
+      register: ip_output
+      changed_when: false
+
+    - name: Show eth0 info
+      debug:
+        var: ip_output.stdout_lines
+
+    - name: Verify node connectivity
+      command: "ping -c 1 {{ item.ip }}"
+      loop: "{{ cluster_hosts }}"
+      when: item.hostname != inventory_hostname
+      changed_when: false

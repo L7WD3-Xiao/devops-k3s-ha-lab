@@ -1,0 +1,43 @@
+---
+# Global variables for all K3s cluster nodes
+
+# Node IP mapping
+node_ips:
+  node-01: 192.168.50.11
+  node-02: 192.168.50.12
+  node-03: 192.168.50.13
+
+# /etc/hosts entries
+cluster_hosts:
+  - { ip: "192.168.50.11", hostname: "node-01" }
+  - { ip: "192.168.50.12", hostname: "node-02" }
+  - { ip: "192.168.50.13", hostname: "node-03" }
+
+# Base packages
+base_packages:
+  - curl
+  - wget
+  - vim
+  - git
+  - net-tools
+  - iproute2
+  - openssh-server
+  - chrony
+  - python3
+  - python3-pip
+  - gnupg
+  - software-properties-common
+  - ca-certificates
+
+# Sysctl parameters for K3s
+sysctl_k3s_config:
+  - { key: "net.ipv4.ip_forward", value: 1 }
+  - { key: "net.bridge.bridge-nf-call-iptables", value: 1 }
+  - { key: "net.bridge.bridge-nf-call-ip6tables", value: 1 }
+
+# Timezone
+timezone: Asia/Shanghai
+
+# Ops user
+ops_user: ops
+ops_password: "{{ 'ops123' | password_hash('sha512') }}"
