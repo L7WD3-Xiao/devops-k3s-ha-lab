@@ -62,7 +62,5 @@ Write-Host "`n=== Verification ===" -ForegroundColor Cyan
 wsl -l -v
 
 Write-Host "`nDone. 3 WSL2 instances created." -ForegroundColor Green
-Write-Host "Next: enter each distro and run the init script." -ForegroundColor Yellow
-Write-Host "  wsl -d k3s-node-01" -ForegroundColor White
-Write-Host "  wsl -d k3s-node-02" -ForegroundColor White
-Write-Host "  wsl -d k3s-node-03" -ForegroundColor White
+Write-Host "Next: upload scripts to each node and run locally." -ForegroundColor Yellow
+Write-Host "  See docs/phase-1-plan.md > Step 2 for details." -ForegroundColor White

@@ -95,7 +95,7 @@ if [ "$NODE_NAME" = "node-01" ]; then
     echo "    pip3 install ansible"
     echo ""
     echo "  Then run the playbook:"
-    echo "    cd /mnt/d/Study/Note/project/k8s/ansible"
+    echo "    cd /home/ops/k3s-cluster/ansible"
     echo "    ansible-playbook -i inventory.ini playbooks/00-init-system.yml"
 else
     echo "  This is a worker node. No SSH key setup needed."
