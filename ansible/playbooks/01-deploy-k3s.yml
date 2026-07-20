@@ -1,0 +1,301 @@
+---
+# 01-deploy-k3s.yml
+# Deploy K3s cluster on 3 WSL2 nodes (1 server + 2 agents)
+#
+# Architecture:
+#   node-01  ── K3s server (control-plane + worker, SQLite datastore)
+#   node-02  ── K3s agent  (worker only)
+#   node-03  ── K3s agent  (worker only)
+#
+# WSL2 Limitation:
+#   K3s HA (multi-server with embedded etcd) is not possible on WSL2
+#   because K3s hardcodes 127.0.0.1 for supervisor (6444) and etcd
+#   client (2379), and WSL2 shares 127.0.0.1 across all distros.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbooks/01-deploy-k3s.yml
+#
+# Idempotent: re-running skips nodes where K3s is already installed.
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Pre-flight checks on all nodes
+# ──────────────────────────────────────────────────────────────
+- name: Pre-flight checks for K3s deployment
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Verify swap is disabled
+      assert:
+        that:
+          - ansible_facts.swaptotal_mb == 0
+        fail_msg: >
+          Swap is still active on {{ inventory_hostname }}.
+          Run 'swapoff -a' and comment swap in /etc/fstab, then re-run.
+        success_msg: "Swap is disabled on {{ inventory_hostname }}"
+
+    - name: Verify systemd is active
+      command: systemctl is-system-running
+      register: systemd_state
+      changed_when: false
+      failed_when: >
+        systemd_state.stdout not in ['running', 'degraded']
+
+    - name: Show systemd state
+      debug:
+        msg: "{{ inventory_hostname }}: systemd is {{ systemd_state.stdout }}"
+
+    - name: Verify node IP is configured on eth0
+      command: ip addr show eth0
+      register: eth0_info
+      changed_when: false
+
+    - name: Check node IP alias exists
+      assert:
+        that:
+          - node_ips[inventory_hostname] in eth0_info.stdout
+        fail_msg: "Node IP {{ node_ips[inventory_hostname] }} not found on eth0"
+        success_msg: "Node IP {{ node_ips[inventory_hostname] }} is configured"
+
+    - name: Verify inter-node connectivity
+      command: "ping -c 1 -W 2 {{ item.ip }}"
+      loop: "{{ cluster_hosts }}"
+      when: item.hostname != inventory_hostname
+      changed_when: false
+
+    - name: Check if K3s is already installed
+      command: which k3s
+      register: k3s_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Show K3s installation status
+      debug:
+        msg: >-
+          {{ inventory_hostname }}: K3s is
+          {{ 'already installed' if k3s_installed.rc == 0 else 'not installed' }}
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: Deploy K3s server (node-01)
+# ──────────────────────────────────────────────────────────────
+- name: Deploy K3s server (node-01)
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create K3s config directory
+      file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy K3s config file
+      template:
+        src: k3s-config.yaml.j2
+        dest: "{{ k3s_config_dir }}/config.yaml"
+        mode: '0600'
+
+    - name: Install K3s server
+      when: hostvars[inventory_hostname]['k3s_installed'].rc | default(1) != 0
+      block:
+        - name: Run K3s install script (server)
+          shell: "curl -sfL https://get.k3s.io | sh -"
+          environment: "{{ {'INSTALL_K3S_VERSION': k3s_version} if k3s_version else {} }}"
+          timeout: 300
+
+        - name: Wait for K3s API port to be listening
+          wait_for:
+            port: "{{ k3s_api_port }}"
+            host: "{{ node_ips[inventory_hostname] }}"
+            timeout: 120
+
+        - name: Wait for K3s to report node ready
+          command: k3s kubectl get node {{ inventory_hostname }}
+          register: node_ready
+          until: "' Ready' in node_ready.stdout"
+          retries: 12
+          delay: 5
+          changed_when: false
+
+    - name: Read K3s cluster token
+      command: cat /var/lib/rancher/k3s/server/node-token
+      register: k3s_token_raw
+      changed_when: false
+
+    - name: Set K3s token as fact (for agent nodes)
+      set_fact:
+        k3s_cluster_token: "{{ k3s_token_raw.stdout }}"
+        cacheable: true
+
+    - name: Show cluster token (first 12 chars for verification)
+      debug:
+        msg: "Cluster token: {{ k3s_cluster_token[:12] }}..."
+
+    - name: Ensure ops user can use kubectl
+      file:
+        path: /home/ops/.kube
+        state: directory
+        owner: ops
+        group: ops
+        mode: '0755'
+
+    - name: Copy kubeconfig for ops user
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/ops/.kube/config
+        owner: ops
+        group: ops
+        mode: '0600'
+        remote_src: true
+
+    - name: Fix server URL in ops kubeconfig
+      replace:
+        path: /home/ops/.kube/config
+        regexp: '127\.0\.0\.1'
+        replace: "{{ node_ips[inventory_hostname] }}"
+
+    - name: Install kubectl symlink (for convenience)
+      file:
+        src: /usr/local/bin/k3s
+        dest: /usr/local/bin/kubectl
+        state: link
+        force: false
+
+    - name: Show node-01 K3s status
+      command: k3s kubectl get nodes -o wide
+      register: nodes_output
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        var: nodes_output.stdout_lines
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Deploy K3s agents (node-02, node-03) — parallel
+# ──────────────────────────────────────────────────────────────
+- name: Deploy K3s agents (join cluster)
+  hosts: node-02,node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Show which node is being deployed
+      debug:
+        msg: "Deploying {{ inventory_hostname }} ({{ node_ips[inventory_hostname] }}) as K3s agent"
+
+    - name: Create K3s config directory
+      file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy K3s config file (agent config with server URL)
+      template:
+        src: k3s-config.yaml.j2
+        dest: "{{ k3s_config_dir }}/config.yaml"
+        mode: '0600'
+
+    - name: Install K3s agent
+      when: hostvars[inventory_hostname]['k3s_installed'].rc | default(1) != 0
+      block:
+        - name: Copy K3s binary from node-01 (avoid GitHub download)
+          copy:
+            src: /usr/local/bin/k3s
+            dest: /usr/local/bin/k3s
+            mode: '0755'
+            owner: root
+            group: root
+
+        - name: Run K3s install script (agent, skip download)
+          shell: "curl -sfL https://get.k3s.io | K3S_URL=https://{{ k3s_first_server_ip }}:{{ k3s_api_port }} K3S_TOKEN={{ hostvars['node-01']['k3s_cluster_token'] }} INSTALL_K3S_SKIP_DOWNLOAD=true sh -"
+          environment: "{{ {'INSTALL_K3S_VERSION': k3s_version} if k3s_version else {} }}"
+          timeout: 120
+
+        - name: Wait for node to appear in cluster (checked from server)
+          command: k3s kubectl get node {{ inventory_hostname }}
+          register: join_result
+          until: "' Ready' in join_result.stdout"
+          retries: 20
+          delay: 5
+          changed_when: false
+          delegate_to: node-01
+
+    - name: Show agent join status
+      command: k3s kubectl get node {{ inventory_hostname }} -o wide
+      register: node_status
+      changed_when: false
+      delegate_to: node-01
+
+    - name: Display node status
+      debug:
+        var: node_status.stdout_lines
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 4: Verify cluster health
+# ──────────────────────────────────────────────────────────────
+- name: Verify K3s cluster health
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get all cluster nodes
+      command: k3s kubectl get nodes -o wide
+      register: nodes_final
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        var: nodes_final.stdout_lines
+
+    - name: Assert all 3 nodes are Ready
+      assert:
+        that:
+          - "'node-01' in nodes_final.stdout"
+          - "'node-02' in nodes_final.stdout"
+          - "'node-03' in nodes_final.stdout"
+          - nodes_final.stdout.count('Ready') >= 3
+        fail_msg: "Not all nodes are Ready!"
+        success_msg: "All 3 nodes are Ready"
+
+    - name: Get all pods across namespaces
+      command: k3s kubectl get pods -A
+      register: pods_final
+      changed_when: false
+
+    - name: Display all pods
+      debug:
+        var: pods_final.stdout_lines
+
+    - name: Get cluster info
+      command: k3s kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        var: cluster_info.stdout_lines
+
+    - name: Display kubeconfig path for host access
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " K3s Cluster deployed successfully!"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " Architecture: 1 server (node-01) + 2 agents (node-02, node-03)"
+          - " Datastore: SQLite (embedded in K3s server)"
+          - ""
+          - " Kubeconfig on node-01: /etc/rancher/k3s/k3s.yaml"
+          - " Kubeconfig for ops:     /home/ops/.kube/config"
+          - ""
+          - " To access from Windows host:"
+          - '   scp node-01:/home/ops/.kube/config %USERPROFILE%\.kube\config'
+          - "   kubectl get nodes"
+          - ""
+          - "═══════════════════════════════════════════════════════"

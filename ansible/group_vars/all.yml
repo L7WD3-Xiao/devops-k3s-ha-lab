@@ -42,3 +42,22 @@ timezone: Asia/Shanghai
 # Ops user
 ops_user: ops
 ops_password: "{{ 'ops123' | password_hash('sha512') }}"
+
+# ── K3s Configuration ─────────────────────────────────────────
+# Version: empty = latest stable. Pin for production reproducibility
+# (e.g., "v1.30.5+k3s1")
+k3s_version: ""
+
+# First server node (cluster-init)
+k3s_first_server: node-01
+k3s_first_server_ip: "{{ node_ips['node-01'] }}"
+
+# K3s API server port
+k3s_api_port: 6443
+
+# Flannel network interface (WSL2: all nodes share eth0)
+k3s_flannel_iface: eth0
+
+# K3s directories
+k3s_config_dir: /etc/rancher/k3s
+k3s_data_dir: /var/lib/rancher/k3s

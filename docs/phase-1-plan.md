@@ -1,794 +1,671 @@
-# Phase 1: WSL2 三节点环境搭建
+# Phase 1: Terraform IaC — 阿里云 ECS 实例创建
 
-## 概述
+> 日期：2026-07-20
+> 状态：计划待实施
+> 前置文档：[aliyun-ecs-k3s-plan.md](aliyun-ecs-k3s-plan.md)（方案调研）
 
-### 目标
+---
 
-在 Windows 本地通过 WSL2 创建 3 个独立 Linux 实例，配置网络互通、SSH 免密、Ansible 自动化管理，为 Phase 2 的 K3s 集群部署打好基础设施。
+## 1. 概述
 
-### 产出物
+### 1.1 目标
+
+使用 **Terraform** 在阿里云杭州地域创建 3 台 ECS 实例，组成 K3s HA 集群的物理基础设施。复用现有 VPC / vSwitch，通过 cloud-init 完成系统初始化，替代已废弃的 WSL2 方案。
+
+### 1.2 产出物
 
 | 产出 | 路径 | 说明 |
 |------|------|------|
-| 3 个 WSL2 实例 | `node-01` / `node-02` / `node-03` | 独立 rootfs + PID，共享网络命名空间 |
-| Ansible 项目 | `ansible/` | inventory + playbook 脚手架 |
-| 初始化脚本 | `scripts/` | WSL2 distro 创建 + 节点初始化 |
+| Terraform 项目 | `terraform/` | main.tf / variables.tf / outputs.tf / user-data.sh |
+| 3 台 ECS 实例 | 阿里云控制台 | ecs.e-c1m1.large × 3，Alibaba Cloud Linux 3 |
+| 安全组 | 阿里云控制台 | K3s 集群安全组（见 §2.4） |
+| Ansible Playbook 适配 | `ansible/` | inventory / group_vars / 00-init-system.yml 适配 |
 | 本计划文档 | `docs/phase-1-plan.md` | 你正在看的这个 |
 
-### 节点规划
+---
 
-| 节点 | WSL Distro 名 | IP 别名 | sshd 监听 | 角色 |
-|------|-------------|---------|-----------|------|
-| node-01 | k3s-node-01 | 192.168.50.11 | 192.168.50.11:22 | Master+Worker+etcd, Ansible 控制节点 |
-| node-02 | k3s-node-02 | 192.168.50.12 | 192.168.50.12:22 | Master+Worker+etcd |
-| node-03 | k3s-node-03 | 192.168.50.13 | 192.168.50.13:22 | Master+Worker+etcd |
+## 2. 基础设施规划
+
+### 2.1 节点规划
+
+| 节点 | 实例类型 | vCPU | 内存 | 系统盘 | 内网 IP（Terraform 分配） | K3s 角色 |
+|------|---------|------|------|--------|--------------------------|---------|
+| k3s-node-1 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.x | server + etcd |
+| k3s-node-2 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.y | server + etcd |
+| k3s-node-3 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.z | server + etcd |
+| **现有 ECS** | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB | 172.26.5.95 | Ansible 控制节点 + Jump Host |
+
+> 新实例不分配公网 IP，通过现有 ECS（47.114.124.150）做 Jump Host SSH 访问。
+> 内网 IP 由 VPC DHCP 分配，Terraform 创建后通过 `outputs` 输出。
+
+### 2.2 网络拓扑
+
+```
+                        ┌─────────────────────────────────────────────────┐
+                        │              阿里云 VPC (172.16.0.0/12)           │
+                        │              cn-hangzhou / cn-hangzhou-i         │
+                        │                                                 │
+   Internet             │   ┌──────────────────────────────────────┐      │
+      │                 │   │   vSwitch: vsw-bp171csb7bkm1n0156f3b │      │
+      │                 │   │                                      │      │
+      ▼                 │   │  ┌─────────────┐  ┌─────────────┐    │      │
+  ┌────────┐            │   │  │  k3s-node-1 │  │  k3s-node-2 │    │      │
+  │公网 IP │──── SSH ───┼──▶│  │ 172.26.5.x  │  │ 172.26.5.y  │    │      │
+  │47.114  │  (Jump)    │   │  │ K3s Server  │  │ K3s Server  │    │      │
+  │.124.150│            │   │  │ + etcd      │  │ + etcd      │    │      │
+  └────────┘            │   │  └──────┬──────┘  └──────┬──────┘    │      │
+       │                │   │         │    VPC 内网     │            │      │
+  ┌────────┐            │   │         └───────┬────────┘            │      │
+  │现有ECS  │            │   │         ┌───────┴──────┐              │      │
+  │astrbot │            │   │         │  k3s-node-3  │              │      │
+  │napcat  │            │   │         │ 172.26.5.z   │              │      │
+  └────────┘            │   │         │ K3s Server   │              │      │
+                        │   │         │ + etcd       │              │      │
+                        │   │         └──────────────┘              │      │
+                        │   └──────────────────────────────────────┘      │
+                        └─────────────────────────────────────────────────┘
+```
+
+### 2.3 现有资源（复用，Terraform data 引用）
+
+| 资源 | ID | 获取方式 |
+|------|----|---------|
+| VPC | vpc-bp1oq6uale5r4id9beupn | `data "alicloud_vpcs" "existing"` |
+| vSwitch | vsw-bp171csb7bkm1n0156f3b | `data "alicloud_vswitchs" "existing"` |
+| 现有 ECS | 172.26.5.95 | 已有，不需创建 |
+
+### 2.4 安全组规则
+
+| 方向 | 协议 | 端口 | 源/目标 | 用途 |
+|------|------|------|---------|------|
+| 入 | TCP | 22 | 172.26.5.95/32（现有 ECS） | SSH 管理（仅 Jump Host） |
+| 入 | TCP | 6443 | 0.0.0.0/0 | K3s API Server |
+| 入 | TCP | 2379-2380 | 同安全组内 | etcd 集群通信 |
+| 入 | TCP | 10250 | 同安全组内 | kubelet |
+| 入 | UDP | 8472 | 同安全组内 | flannel VXLAN |
+| 入 | TCP | 80, 443 | 0.0.0.0/0 | 业务 Ingress |
+| 出 | ALL | ALL | 0.0.0.0/0 | 默认允许 |
+
+> ⚠️ etcd 端口（2379/2380）务必限制为同安全组内，**不要对公网开放**。
+
+### 2.5 操作系统
+
+| 镜像 | 说明 |
+|------|------|
+| Alibaba Cloud Linux 3.2104 | 与现有服务器一致，RHEL 8 兼容，内核 5.10，免费使用阿里云内网 yum 源 |
+
+> K3s 官方支持 RHEL 8+，Alibaba Cloud Linux 3 基于 platform:al8，兼容性良好。
 
 ---
 
-## WSL2 多实例架构说明
+## 3. Terraform 项目设计
 
-### 核心挑战：共享网络命名空间
-
-WSL2 的多个 distro 实例运行在同一个轻量级 Utility VM 中，它们 **共享同一个内核和网络命名空间**。这意味着：
-
-- 所有 distro 看到的是同一块 `eth0` 网卡，同一个 IP
-- 默认情况下无法通过不同 IP 区分节点
-- 端口绑定冲突：如果所有 sshd 都监听 `0.0.0.0:22`，只有一个能启动
-
-### 解决方案：eth0 IP 别名
-
-为每个 distro 在共享的 `eth0` 上添加独立的 IP 别名（alias），并通过 `ListenAddress` 将 sshd 绑定到各自的 IP：
+### 3.1 目录结构
 
 ```
-eth0: 172.x.x.x (WSL2 NAT 默认地址，所有 distro 共享)
-    + 192.168.50.11  (node-01 别名)
-    + 192.168.50.12  (node-02 别名)
-    + 192.168.50.13  (node-03 别名)
+terraform/
+├── main.tf           # 主配置：provider + data + 资源定义
+├── variables.tf      # 输入变量
+├── outputs.tf        # 输出（ECS 内网 IP、实例 ID 等）
+├── user-data.sh      # cloud-init 初始化脚本
+├── terraform.tfvars  # 变量赋值（不含敏感信息）
+└── README.md         # 使用说明
 ```
 
-**为什么能工作**：
+### 3.2 `variables.tf` — 输入变量
 
-1. 所有 IP 别名都在同一块 eth0 上，所有 distro 都能访问到全部 3 个 IP
-2. 每个 distro 的 sshd 绑定到自己的 IP（`ListenAddress 192.168.50.1X`），不冲突
-3. 每个 distro 的 K3s 使用 `--node-ip 192.168.50.1X` 声明自己的地址
-4. etcd 集群通过这些 IP 互相通信，连通性有保障
+```hcl
+# ── 阿里云 Provider 配置 ──
+variable "alicloud_region" {
+  description = "阿里云地域"
+  type        = string
+  default     = "cn-hangzhou"
+}
 
-**隔离性说明**：distro 之间的隔离在 **文件系统 + 进程空间** 层面（各自独立），网络层面是共享的。对于学习项目完全足够。
+# ── 复用现有网络 ──
+variable "vpc_id" {
+  description = "现有 VPC ID"
+  type        = string
+  default     = "vpc-bp1oq6uale5r4id9beupn"
+}
 
-### IP 别名持久化
+variable "vswitch_id" {
+  description = "现有 vSwitch ID"
+  type        = string
+  default     = "vsw-bp171csb7bkm1n0156f3b"
+}
 
-WSL2 重启后 `ip addr add` 添加的别名会丢失。需要创建 systemd service 在启动时自动添加。
+# ── ECS 实例配置 ──
+variable "instance_type" {
+  description = "ECS 实例规格"
+  type        = string
+  default     = "ecs.e-c1m1.large"
+}
 
----
+variable "image_id" {
+  description = "镜像 ID（Alibaba Cloud Linux 3）"
+  type        = string
+  default     = ""  # 留空则通过 data 自动查询最新
+}
 
-## 步骤 1: 创建 WSL2 实例
+variable "system_disk_size" {
+  description = "系统盘大小（GB）"
+  type        = number
+  default     = 40
+}
 
-### 1.1 前置条件检查
+variable "system_disk_category" {
+  description = "系统盘类型"
+  type        = string
+  default     = "cloud_essd_entry"
+}
 
-在 Windows PowerShell 中执行：
+# ── 节点配置 ──
+variable "node_count" {
+  description = "K3s 节点数量"
+  type        = number
+  default     = 3
+}
 
-```powershell
-# 确认 WSL2 已安装
-wsl --status
+variable "node_name_prefix" {
+  description = "节点名前缀"
+  type        = string
+  default     = "k3s-node"
+}
 
-# 确认默认版本为 2
-wsl --set-default-version 2
+# ── SSH 密钥 ──
+variable "ssh_key_name" {
+  description = "SSH 密钥对名称（需在阿里云控制台预先创建）"
+  type        = string
+  default     = "k3s-cluster-key"
+}
 
-# 如果没有 Ubuntu，安装一个作为基础镜像
-wsl --install -d Ubuntu
+# ── Jump Host ──
+variable "jump_host_ip" {
+  description = "Jump Host 内网 IP（现有 ECS，用于安全组 SSH 限制）"
+  type        = string
+  default     = "172.26.5.95"
+}
+
+# ── Ops 用户 ──
+variable "ops_user" {
+  description = "运维用户名"
+  type        = string
+  default     = "ops"
+}
+
+variable "ops_pubkey" {
+  description = "Ops 用户的 SSH 公钥（用于 cloud-init 注入）"
+  type        = string
+  default     = ""  # 在 terraform.tfvars 中设置
+}
 ```
 
-### 1.2 导出基础镜像
+### 3.3 `main.tf` — 主配置
 
-启动一次 Ubuntu，完成初始用户设置后退出。然后导出：
+```hcl
+terraform {
+  required_providers {
+    alicloud = {
+      source  = "aliyun/alicloud"
+      version = "~> 1.220"
+    }
+  }
+}
 
-```powershell
-# 创建存储目录
-mkdir D:\WSL\k3s-cluster
+provider "alicloud" {
+  region = var.alicloud_region
+}
 
-# 导出基础镜像
-wsl --export Ubuntu D:\WSL\k3s-cluster\ubuntu-base.tar
+# ── 引用现有 VPC ──
+data "alicloud_vpcs" "existing" {
+  ids = [var.vpc_id]
+}
+
+# ── 引用现有 vSwitch ──
+data "alicloud_vswitchs" "existing" {
+  ids = [var.vswitch_id]
+}
+
+# ── 查询最新 Alibaba Cloud Linux 3 镜像（如未指定 image_id）──
+data "alicloud_images" "acl3" {
+  count       = var.image_id == "" ? 1 : 0
+  name_regex  = "^alibaba_cloud_linux_3.*2104.*x64"
+  most_recent = true
+  owners      = "system"
+}
+
+locals {
+  image_id    = var.image_id != "" ? var.image_id : data.alicloud_images.acl3[0].images[0].id
+  vpc_cidr    = data.alicloud_vpcs.existing.vpcs[0].cidr_block
+}
+
+# ── 安全组 ──
+resource "alicloud_security_group" "k3s" {
+  name        = "k3s-cluster-sg"
+  description = "Security group for K3s HA cluster"
+  vpc_id      = var.vpc_id
+}
+
+# SSH: 仅允许 Jump Host
+resource "alicloud_security_group_rule" "ssh" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "22/22"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = "${var.jump_host_ip}/32"
+}
+
+# K3s API Server: 公网可访问（可收紧为 VPC CIDR）
+resource "alicloud_security_group_rule" "k3s_api" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "6443/6443"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = "0.0.0.0/0"
+}
+
+# etcd: 仅安全组内部
+resource "alicloud_security_group_rule" "etcd_client" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "2379/2379"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = local.vpc_cidr
+}
+
+resource "alicloud_security_group_rule" "etcd_peer" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "2380/2380"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = local.vpc_cidr
+}
+
+# kubelet: 仅安全组内部
+resource "alicloud_security_group_rule" "kubelet" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "10250/10250"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = local.vpc_cidr
+}
+
+# flannel VXLAN: 仅安全组内部
+resource "alicloud_security_group_rule" "flannel" {
+  type              = "ingress"
+  ip_protocol       = "udp"
+  port_range        = "8472/8472"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = local.vpc_cidr
+}
+
+# Ingress HTTP/HTTPS: 公网可访问
+resource "alicloud_security_group_rule" "http" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "80/80"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = "0.0.0.0/0"
+}
+
+resource "alicloud_security_group_rule" "https" {
+  type              = "ingress"
+  ip_protocol       = "tcp"
+  port_range        = "443/443"
+  security_group_id = alicloud_security_group.k3s.id
+  cidr_ip           = "0.0.0.0/0"
+}
+
+# ── ECS 实例 ──
+resource "alicloud_instance" "k3s_nodes" {
+  count                     = var.node_count
+  instance_name             = "${var.node_name_prefix}-${count.index + 1}"
+  host_name                 = "${var.node_name_prefix}-${count.index + 1}"
+  instance_type             = var.instance_type
+  image_id                  = local.image_id
+  security_groups           = [alicloud_security_group.k3s.id]
+  vswitch_id                = var.vswitch_id
+  system_disk_size          = var.system_disk_size
+  system_disk_category      = var.system_disk_category
+  internet_max_bandwidth_out = 0  # 不分配公网 IP
+  key_name                  = var.ssh_key_name  # 阿里云密钥对（root 用户）
+
+  # cloud-init user-data
+  user_data = templatefile("${path.module}/user-data.sh", {
+    ops_user   = var.ops_user
+    ops_pubkey = var.ops_pubkey
+  })
+
+  tags = {
+    Project    = "k3s-cluster"
+    Phase      = "phase-1"
+    NodeRole   = "server-etcd"
+    NodeIndex  = tostring(count.index + 1)
+  }
+}
 ```
 
-### 1.3 导入 3 个实例
+### 3.4 `outputs.tf` — 输出
 
-```powershell
-# 导入 node-01
-wsl --import k3s-node-01 D:\WSL\k3s-cluster\node-01 D:\WSL\k3s-cluster\ubuntu-base.tar --version 2
+```hcl
+output "k3s_node_private_ips" {
+  description = "K3s 节点内网 IP（用于 Ansible inventory）"
+  value = {
+    for i, instance in alicloud_instance.k3s_nodes :
+    "k3s-node-${i + 1}" => instance.private_ip
+  }
+}
 
-# 导入 node-02
-wsl --import k3s-node-02 D:\WSL\k3s-cluster\node-02 D:\WSL\k3s-cluster\ubuntu-base.tar --version 2
+output "k3s_node_instance_ids" {
+  description = "ECS 实例 ID"
+  value = {
+    for i, instance in alicloud_instance.k3s_nodes :
+    "k3s-node-${i + 1}" => instance.id
+  }
+}
 
-# 导入 node-03
-wsl --import k3s-node-03 D:\WSL\k3s-cluster\node-03 D:\WSL\k3s-cluster\ubuntu-base.tar --version 2
+output "security_group_id" {
+  description = "安全组 ID"
+  value       = alicloud_security_group.k3s.id
+}
+
+output "jump_host_ssh_command" {
+  description = "通过 Jump Host 连接节点的示例命令"
+  value = [
+    for i, instance in alicloud_instance.k3s_nodes :
+    "ssh -J ops@47.114.124.150 ops@${instance.private_ip}"
+  ]
+}
 ```
 
-> **注意**：`wsl --import` 创建的实例默认以 root 登录，后续会创建普通用户。
-
-### 1.4 验证
-
-```powershell
-wsl -l -v
-```
-
-应看到 4 个 distro（含原始 Ubuntu + 3 个新实例），版本均为 2。
-
----
-
-## 步骤 2: 系统初始化（每节点执行）
-
-以下操作需要在 **每个 distro** 中各执行一次。可以通过 `wsl -d k3s-node-0X` 进入对应实例。
-
-### 2.1 启用 systemd
-
-WSL2 默认不启用 systemd，K3s 和 sshd 都依赖它。
+### 3.5 `user-data.sh` — cloud-init 初始化脚本
 
 ```bash
-# 在每个 distro 中执行
-cat > /etc/wsl.conf << 'EOF'
-[boot]
-systemd=true
+#!/bin/bash
+# cloud-init user-data for K3s cluster nodes
+# Runs as root on first boot
 
-[network]
-hostname=node-01
-generateHosts=false
-generateResolvConf=true
+set -euo pipefail
 
-[interop]
-enabled=true
-appendWindowsPath=false
-EOF
-```
+OPS_USER="${ops_user}"
+OPS_PUBKEY="${ops_pubkey}"
 
-> 将 `hostname=node-01` 替换为对应节点名（node-02 / node-03）。
-
-修改完成后，需要在 PowerShell 中重启 WSL：
-
-```powershell
-wsl --shutdown
-# 然后重新进入各 distro
-```
-
-### 2.2 配置 /etc/hosts
-
-```bash
-cat > /etc/hosts << 'EOF'
-127.0.0.1   localhost
-192.168.50.11  node-01
-192.168.50.12  node-02
-192.168.50.13  node-03
-EOF
-```
-
-### 2.3 关闭 swap
-
-K3s 要求关闭 swap。
-
-```bash
-# 临时关闭
+# ── 1. 关闭 swap ──
 swapoff -a
+sed -i '/swap/d' /etc/fstab
 
-# 永久关闭：注释 /etc/fstab 中的 swap 行
-sed -i '/swap/s/^/#/' /etc/fstab
-```
-
-> WSL2 的 swap 还受 `.wslconfig` 控制。在 Windows 用户目录下创建 `C:\Users\<你的用户名>\.wslconfig`：
-> ```ini
-> [wsl2]
-> swap=0
-> ```
-
-### 2.4 内核参数调优
-
-```bash
+# ── 2. 内核参数 ──
 cat > /etc/sysctl.d/99-k3s.conf << 'EOF'
 net.ipv4.ip_forward=1
 net.bridge.bridge-nf-call-iptables=1
 net.bridge.bridge-nf-call-ip6tables=1
 EOF
-
-# 应用
+modprobe br_netfilter 2>/dev/null || true
 sysctl --system
-```
 
-> **WSL2 内核模块注意**：`br_netfilter` 模块在 WSL2 自定义内核中可能未加载。如果 `sysctl` 报错 `cannot stat /proc/sys/net/bridge/bridge-nf-call-iptables`，执行 `modprobe br_netfilter`。如果模块不存在，暂时注释掉这两行，K3s 的 Flannel 仍可工作。
+# ── 3. 安装基础软件包（dnf, RHEL 系）──
+dnf install -y curl wget vim git net-tools iproute2 chrony python3 python3-pip \
+    gnupg ca-certificates tar gzip
 
-### 2.5 安装基础软件包
-
-```bash
-apt-get update && apt-get install -y \
-    curl wget vim git \
-    net-tools iproute2 \
-    openssh-server \
-    chrony \
-    python3 python3-pip \
-    gnupg software-properties-common \
-    ca-certificates
-```
-
-### 2.6 设置时区
-
-```bash
+# ── 4. 时区 & 时间同步 ──
 timedatectl set-timezone Asia/Shanghai
-systemctl enable chrony
-systemctl start chrony
+systemctl enable --now chronyd
+
+# ── 5. 创建 ops 用户 ──
+useradd -m -s /bin/bash -G wheel "${OPS_USER}"
+echo "${OPS_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${OPS_USER}"
+chmod 0440 "/etc/sudoers.d/${OPS_USER}"
+
+# ── 6. 配置 ops SSH 公钥 ──
+mkdir -p "/home/${OPS_USER}/.ssh"
+echo "${OPS_PUBKEY}" > "/home/${OPS_USER}/.ssh/authorized_keys"
+chmod 700 "/home/${OPS_USER}/.ssh"
+chmod 600 "/home/${OPS_USER}/.ssh/authorized_keys"
+chown -R "${OPS_USER}:${OPS_USER}" "/home/${OPS_USER}/.ssh"
+
+# ── 7. 配置 /etc/hosts（节点间解析）──
+# 注：内网 IP 在 cloud-init 运行时可能还未完全分配
+# Ansible Playbook 00 会补充完整的 /etc/hosts
+echo "# K3s cluster hosts (managed by Ansible)" >> /etc/hosts
+
+# ── 8. 禁用 firewalld（K3s 自行管理网络规则）──
+systemctl disable --now firewalld 2>/dev/null || true
+
+# ── 9. 标记 cloud-init 完成 ──
+touch /tmp/cloud-init-k3s-done
 ```
+
+### 3.6 `terraform.tfvars` — 变量赋值
+
+```hcl
+# 在此处填入你的 SSH 公钥（用于 ops 用户免密登录）
+ops_pubkey = "ssh-ed25519 AAAAC3Nz... your_email@example.com"
+```
+
+> ⚠️ 不要将 `terraform.tfvars` 提交到 Git。在 `.gitignore` 中排除。
 
 ---
 
-## 步骤 3: 网络配置（IP 别名）
+## 4. 实施步骤
 
-### 3.1 创建 IP 别名持久化服务
-
-在每个 distro 中创建 systemd service，使 IP 别名在 WSL 重启后自动恢复。
+### Step 0: 前置准备
 
 ```bash
-# node-01 中执行
-cat > /etc/systemd/system/wsl-ip-alias.service << 'EOF'
-[Unit]
-Description=WSL2 IP Alias for K3s node
-After=network.target
+# 1. 安装 Terraform（本地 Windows 或现有 ECS）
+#    下载地址: https://developer.hashicorp.com/terraform/downloads
 
-[Service]
-Type=oneshot
-ExecStart=/sbin/ip addr add 192.168.50.11/24 dev eth0
-ExecStop=/sbin/ip addr del 192.168.50.11/24 dev eth0
-RemainAfterExit=yes
+# 2. 配置阿里云凭证（环境变量）
+export ALICLOUD_ACCESS_KEY="your-access-key"
+export ALICLOUD_SECRET_KEY="your-secret-key"
 
-[Install]
-WantedBy=multi-user.target
-EOF
+# 3. 在阿里云控制台创建 SSH 密钥对 "k3s-cluster-key"（用于 root 用户）
+#    ECS 控制台 → 密钥对 → 创建密钥对 → 下载 .pem 文件
 
-systemctl daemon-reload
-systemctl enable wsl-ip-alias.service
-systemctl start wsl-ip-alias.service
+# 4. 在 terraform.tfvars 中填入 ops 用户的 SSH 公钥
 ```
 
-> node-02 替换为 `192.168.50.12`，node-03 替换为 `192.168.50.13`。
-
-### 3.2 验证 IP 可达性
+### Step 1: Terraform 初始化 & 预览
 
 ```bash
-# 在 node-01 中验证
-ip addr show eth0
-# 应看到 172.x.x.x 和 192.168.50.11 两个 IP
+cd terraform/
 
-ping -c 2 192.168.50.12  # 能 ping 通 node-02 的 IP
-ping -c 2 192.168.50.13  # 能 ping 通 node-03 的 IP
+# 初始化 Provider
+terraform init
+
+# 预览将创建的资源
+terraform plan
 ```
 
----
-
-## 步骤 4: SSH 免密配置
-
-### 4.1 配置 sshd 绑定独立 IP
-
-每个 distro 的 sshd 必须绑定到自己的 IP，否则端口冲突。
+### Step 2: 创建基础设施
 
 ```bash
-# node-01 中执行
-sed -i 's/^#\?ListenAddress.*/ListenAddress 192.168.50.11/' /etc/ssh/sshd_config
-sed -i 's/^#\?Port.*/Port 22/' /etc/ssh/sshd_config
+# 执行创建（约 2-3 分钟）
+terraform apply -auto-approve
 
-# 确保 sshd 启动
-systemctl enable ssh
-systemctl restart ssh
+# 记录输出的内网 IP（后续 Ansible inventory 需要）
+terraform output -json k3s_node_private_ips
 ```
 
-> node-02 替换为 `192.168.50.12`，node-03 替换为 `192.168.50.13`。
+预期输出示例：
+```json
+{
+  "k3s-node-1": "172.26.5.101",
+  "k3s-node-2": "172.26.5.102",
+  "k3s-node-3": "172.26.5.103"
+}
+```
 
-### 4.2 创建运维用户（可选但推荐）
+### Step 3: 验证 cloud-init 完成
 
 ```bash
-# 在每个 distro 中创建相同的用户
-useradd -m -s /bin/bash ops
-echo 'ops:ops123' | chpasswd
-echo 'ops ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ops
+# 通过 Jump Host SSH 到新实例
+ssh -J ops@47.114.124.150 ops@172.26.5.101
+
+# 验证初始化
+hostname                    # k3s-node-1
+free -h                     # Swap 全为 0
+sysctl net.ipv4.ip_forward  # 返回 1
+timedatectl                 # Asia/Shanghai
+which dnf                   # /usr/bin/dnf
+ls /tmp/cloud-init-k3s-done # 文件存在
 ```
 
-### 4.3 生成并分发 SSH 密钥
+### Step 4: 配置 Ansible Inventory
 
-在 node-01（Ansible 控制节点）上：
-
-```bash
-# 切换到 ops 用户
-su - ops
-
-# 生成密钥对（一路回车）
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
-
-# 分发公钥到三个节点（密码 ops123）
-ssh-copy-id ops@192.168.50.11
-ssh-copy-id ops@192.168.50.12
-ssh-copy-id ops@192.168.50.13
-```
-
-### 4.4 验证免密登录
-
-```bash
-ssh ops@192.168.50.12 hostname  # 应输出 node-02，无需密码
-ssh ops@192.168.50.13 hostname  # 应输出 node-03，无需密码
-```
-
----
-
-## 步骤 5: Ansible 环境搭建
-
-### 5.1 安装 Ansible（node-01）
-
-```bash
-# 在 node-01 上以 ops 用户操作
-# 使用 pip 安装（Ubuntu apt 版本较旧）
-pip3 install ansible
-```
-
-### 5.2 项目结构
-
-Ansible 项目部署在 node-01 的 `/home/ops/k3s-cluster/ansible` 目录下（通过 SCP 上传，非挂载卷）：
-
-```
-/home/ops/k3s-cluster/ansible/
-├── ansible.cfg              # Ansible 配置
-├── inventory.ini            # 节点清单
-├── group_vars/
-│   └── all.yml              # 全局变量
-└── playbooks/
-    └── 00-init-system.yml   # 基础初始化 Playbook
-```
-
-### 5.3 inventory.ini
+根据 `terraform output` 的实际 IP，更新 `ansible/inventory.ini`：
 
 ```ini
-[k3s_cluster]
-node-01 ansible_host=192.168.50.11
-node-02 ansible_host=192.168.50.12
-node-03 ansible_host=192.168.50.13
+[k3s_servers]
+k3s-node-1 ansible_host=172.26.5.101
+k3s-node-2 ansible_host=172.26.5.102
+k3s-node-3 ansible_host=172.26.5.103
+
+[k3s_cluster:children]
+k3s_servers
 
 [k3s_cluster:vars]
 ansible_user=ops
-ansible_ssh_private_key_file=/home/ops/.ssh/id_ed25519
+ansible_ssh_private_key_file=~/.ssh/id_ed25519
 ansible_python_interpreter=/usr/bin/python3
 ```
 
-### 5.4 测试连通性
+### Step 5: 运行 Ansible 系统初始化
 
 ```bash
-cd /home/ops/k3s-cluster/ansible
-ansible all -i inventory.ini -m ping
-```
-
-三个节点都应返回 `SUCCESS`。
-
----
-
-## 步骤 6: 基础初始化 Playbook
-
-编写 `00-init-system.yml`，用 Ansible 统一执行步骤 2 中的系统初始化操作，确保三节点配置一致、可复现。
-
-### Playbook 功能
-
-| Task | 模块 | 说明 |
-|------|------|------|
-| 更新 apt 缓存 | apt | 三节点同步更新 |
-| 安装基础软件包 | apt | 统一软件清单 |
-| 关闭 swap | shell + lineinfile | 临时关闭 + 永久注释 fstab |
-| 配置 sysctl | copy + sysctl | K3s 内核参数 |
-| 设置时区 | timezone | Asia/Shanghai |
-| 启动 chrony | service | 时间同步 |
-| 配置 /etc/hosts | copy | 节点解析 |
-| 创建 ops 用户 | user | 统一运维用户 |
-
-### 执行方式
-
-```bash
+# 在现有 ECS（Jump Host）上运行
+cd /home/ops/k8s-project/ansible
 ansible-playbook -i inventory.ini playbooks/00-init-system.yml
 ```
 
----
-
-## 验证清单
-
-全部完成后，逐项验证：
-
-- [ ] `wsl -l -v` 显示 3 个 k3s-node-0X 实例，版本 2
-- [ ] 每个 distro 中 `systemctl is-system-running` 显示 `running`（`degraded` 也可接受，详见 WSL2 特殊注意事项）
-- [ ] `hostname` 分别返回 node-01 / node-02 / node-03
-- [ ] `ip addr show eth0` 各节点看到自己的 192.168.50.1X
-- [ ] **宿主机** `ssh node-01 hostname` 免密返回 node-01（宿主机 SSH 已配置）
-- [ ] **宿主机** `ssh node-02 hostname` 免密返回 node-02
-- [ ] **宿主机** `ssh node-03 hostname` 免密返回 node-03
-- [ ] node-01 内 `ssh ops@192.168.50.12 hostname` 免密返回 node-02（节点间互通）
-- [ ] `ansible all -m ping` 三节点全部 SUCCESS
-- [ ] `free -h` 中 Swap 全为 0
-- [ ] `sysctl net.ipv4.ip_forward` 返回 1
-- [ ] `timedatectl` 时区为 Asia/Shanghai
-- [ ] Ansible 项目位于 `/home/ops/k3s-cluster/ansible`（节点本地，非挂载卷）
-
----
-
-## WSL2 特殊注意事项
-
-| 问题 | 原因 | 解决方案 |
-|------|------|---------|
-| IP 别名重启丢失 | WSL2 网络非持久化 | systemd service `wsl-ip-alias.service` |
-| 主机名被重置 | WSL2 启动时可能覆盖 | `/etc/wsl.conf` 中设置 `hostname` + `generateHosts=false` |
-| `br_netfilter` 不可用 | WSL2 自定义内核可能未编译该模块 | `modprobe br_netfilter`；若失败则注释相关 sysctl，K3s Flannel 仍可工作 |
-| swap 无法通过 fstab 完全关闭 | WSL2 的 swap 由 `.wslconfig` 管理 | 在 Windows 用户目录创建 `.wslconfig` 设置 `swap=0` |
-| `wsl --shutdown` 影响所有 distro | WSL2 共享 VM | 所有 distro 会同时关闭，需要重新启动需要的实例 |
-| systemd 未启动 | `/etc/wsl.conf` 修改后未重启 | `wsl --shutdown` 后重新进入 |
-| systemd 显示 `degraded` | `getty@tty1.service` 失败（WSL2 无物理终端） | 不影响 K3s，可忽略；或 `systemctl mask getty@tty1` |
-| distro 执行完命令即关闭 | WSL2 无持久进程时自动回收 | 用 `start-all-nodes.ps1` 后台保活 |
-| 宿主机无法访问 192.168.50.x | WSL2 NAT 模式下 192.168.50.0/24 不在默认路由 | `route add 192.168.50.0 mask 255.255.255.0 <wsl-gateway>` |
-| 磁盘空间 | 每个 distro 约 1-2GB | 确保导入目录所在盘有足够空间 |
-
----
-
-## 快速执行流程（修正版）
-
-> **设计原则**：所有脚本上传到节点本地后执行，不通过 WSL 挂载卷直接调用宿主机脚本。这样增加兼容性并模拟非 WSL 的真实集群场景。
->
-> **SSH 策略**：Phase 1 引导阶段使用 `wsl -d` 进入节点执行命令；SSH 配置完成后，**Phase 2 及后续所有阶段均通过宿主机 SSH 连接集群操作**，不再使用 `wsl -d` 命令。
-
-### Step 0: Windows 侧准备
-
-```powershell
-# 在 PowerShell 中执行
-
-# 1. 确认 WSL2 可用
-wsl --status
-wsl --set-default-version 2
-
-# 2. 如果没有 Ubuntu，安装一个
-wsl --install -d Ubuntu
-# 启动一次完成初始用户设置，然后关闭
-
-# 3. 创建 .wslconfig 关闭 swap（K3s 要求）
-# 路径: C:\Users\<你的用户名>\.wslconfig
-@"
-[wsl2]
-swap=0
-memory=8GB
-processors=4
-"@ | Out-File -FilePath "$env:USERPROFILE\.wslconfig" -Encoding utf8
-
-# 4. 添加路由：让宿主机能访问 WSL2 内的 192.168.50.0/24 网段
-#    （WSL2 NAT 模式下，宿主机默认只能访问 WSL2 的 172.x.x.x 网段）
-wsl --shutdown
-Start-Sleep -Seconds 3
-wsl -d k3s-node-01 -u root -- echo "WSL started" 2>$null  # 触发 WSL 网络初始化
-Start-Sleep -Seconds 2
-$wslGateway = (Get-NetIPAddress -InterfaceAlias "vEthernet (WSL*)" -AddressFamily IPv4).IPAddress
-route add 192.168.50.0 mask 255.255.255.0 $wslGateway
-Write-Host "Route added: 192.168.50.0/24 via $wslGateway"
-```
-
-> **关于路由**：WSL2 NAT 模式下，`192.168.50.0/24` 是我们手动添加的 IP 别名，不在 WSL2 默认网段内。需要告诉 Windows 怎么路由到这个网段。上面的命令获取 WSL 虚拟网卡 IP 作为网关。
->
-> **替代方案**：如果你使用 WSL2 `networkingMode=mirrored`（Windows 11 22H2+），则不需要添加路由，宿主机可以直接访问所有 WSL2 IP。
-
-### Step 1: 创建 3 个 WSL 实例
-
-```powershell
-# 在 PowerShell 中执行（工作目录已为项目根目录）
-.\scripts\01-create-distros.ps1
-```
-
-### Step 2: 上传脚本并初始化各节点（WSL 重启前）
-
-> 脚本通过 WSL 挂载卷复制到节点 `/tmp/k3s-bootstrap/` 目录，然后在节点本地执行。
-> 这模拟了真实集群中"上传脚本 → 本地执行"的模式。
-
-```powershell
-# 定义脚本源路径（基于当前工作目录动态获取，不硬编码绝对路径）
-$scriptsDir = "$PWD\scripts"
-# 转换为 WSL 挂载路径（用于通过挂载卷将脚本上传到节点本地）
-$wslScriptsDir = (wsl wslpath -u "$scriptsDir").Trim()
-
-# --- node-01 ---
-# 上传脚本到节点本地
-wsl -d k3s-node-01 -u root -- bash -c "mkdir -p /tmp/k3s-bootstrap && cp '$wslScriptsDir/02-init-node.sh' /tmp/k3s-bootstrap/"
-# 在节点本地执行
-wsl -d k3s-node-01 -u root -- bash /tmp/k3s-bootstrap/02-init-node.sh node-01 192.168.50.11
-
-# --- node-02 ---
-wsl -d k3s-node-02 -u root -- bash -c "mkdir -p /tmp/k3s-bootstrap && cp '$wslScriptsDir/02-init-node.sh' /tmp/k3s-bootstrap/"
-wsl -d k3s-node-02 -u root -- bash /tmp/k3s-bootstrap/02-init-node.sh node-02 192.168.50.12
-
-# --- node-03 ---
-wsl -d k3s-node-03 -u root -- bash -c "mkdir -p /tmp/k3s-bootstrap && cp '$wslScriptsDir/02-init-node.sh' /tmp/k3s-bootstrap/"
-wsl -d k3s-node-03 -u root -- bash /tmp/k3s-bootstrap/02-init-node.sh node-03 192.168.50.13
-```
-
-<details>
-<summary><b>📖 上传脚本的最佳实践（补充说明）</b></summary>
-
-上面的流程通过 WSL 挂载卷 `cp` 上传脚本，这是 Phase 1 引导阶段的临时手段——此时 SSH 尚未配置，无法使用 `scp`。在 SSH 可用后（Step 6 起），推荐采用以下生产级模式：
+### Step 6: 验证
 
 ```bash
-# ── 以 02-init-node.sh 为例，SSH 可用后的标准上传执行流程 ──
-
-# 1. 本地语法检查（上传前确认脚本无语法错误，避免远端报错浪费往返）
-bash -n scripts/02-init-node.sh
-
-# 2. 通过 SCP 上传到目标节点的安全目录
-scp scripts/02-init-node.sh node-01:/tmp/k3s-bootstrap/
-
-# 3. 远程执行（开启伪终端 -t 保留环境变量，tee 同时输出到终端和带时间戳的日志）
-ssh -t node-01 "bash -c 'cd /tmp/k3s-bootstrap && ./02-init-node.sh node-01 192.168.50.11 2>&1 | tee /var/log/k3s-bootstrap-$(date +%Y%m%d_%H%M%S).log'"
-
-# 4. 检查返回值（0=成功，非 0=失败）
-echo $?
-```
-
-**每一步的作用**：
-
-| 步骤 | 命令 | 解决什么问题 |
-|------|------|------------|
-| 语法检查 | `bash -n` | 上传前就发现语法错误，避免"上传→远端报错→改了再传"的往返浪费 |
-| SCP 上传 | `scp ... node-01:/path/` | 通用传输方式，非 WSL 环境（真实服务器、云主机）同样适用 |
-| 伪终端 + tee | `ssh -t ... \| tee log` | `-t` 保留远端环境变量（如 `$PATH`）；`tee` 输出同时落盘，事后可追溯 |
-| 返回值检查 | `echo $?` | 自动化判断成败，可嵌入 CI/CD 或脚本做条件分支 |
-
-**与当前 Phase 1 流程的对比**：
-
-| 维度 | 当前流程（Phase 1 引导） | 最佳实践（SSH 可用后） |
-|------|------------------------|---------------------|
-| 传输方式 | WSL 挂载卷 `cp` | `scp`（通用，非 WSL 环境同样适用） |
-| 语法检查 | 无 | `bash -n` 上传前验证 |
-| 执行日志 | 仅输出到终端，关闭后不可追溯 | `tee` 同时输出到终端和带时间戳的日志文件 |
-| 返回值检查 | 人工观察输出 | `$?` 自动判断，可脚本化 |
-| 适用场景 | SSH 未就绪的引导阶段（Step 2-5） | SSH 可用后的所有阶段（Step 6 起） |
-
-> **为什么 Phase 1 不能直接用最佳实践？** Step 2 执行时 sshd 尚未安装和配置（这正是 02-init-node.sh 要做的事），无法 `scp` 或 `ssh`。这是"鸡生蛋"问题——需要先用 WSL 挂载卷引导出 SSH 能力，之后才能切换到标准模式。
-
-</details>
-
-### Step 3: 重启 WSL 使 systemd 生效
-
-```powershell
-wsl --shutdown
-# 等待 5 秒后重新进入
-```
-
-### Step 4: 启动所有节点并上传引导脚本
-
-> WSL2 distro 执行完命令后会自动关闭，需要用后台进程保活。
-> 使用 `start-all-nodes.ps1` 同时启动 3 个节点。
-
-```powershell
-# 启动所有节点（保持运行）
-.\scripts\start-all-nodes.ps1
-
-# 上传引导脚本到各节点
-$nodes = @(
-    @{ Distro = "k3s-node-01"; Name = "node-01"; IP = "192.168.50.11" }
-    @{ Distro = "k3s-node-02"; Name = "node-02"; IP = "192.168.50.12" }
-    @{ Distro = "k3s-node-03"; Name = "node-03"; IP = "192.168.50.13" }
-)
-
-foreach ($node in $nodes) {
-    # 上传 03-post-restart.sh 到节点本地（$wslScriptsDir 在 Step 2 中定义）
-    wsl -d $node.Distro -u root -- bash -c "mkdir -p /tmp/k3s-bootstrap && cp '$wslScriptsDir/03-post-restart.sh' /tmp/k3s-bootstrap/"
-    # 在节点本地执行
-    wsl -d $node.Distro -u root -- bash /tmp/k3s-bootstrap/03-post-restart.sh $node.Name $node.IP
-}
-```
-
-> **上传脚本最佳实践**：此处与 Step 2 相同，使用 WSL 挂载卷上传是因为 systemd 刚重启、SSH 密钥尚未分发。Step 6 SSH 配置完成后，后续脚本上传应切换为 `scp + tee + $?` 模式（详见 Step 2 补充说明）。
-
-### Step 5: 分发 SSH 密钥（在 node-01 中）
-
-```powershell
-# 通过 wsl 进入 node-01
-wsl -d k3s-node-01 -u ops
-```
-
-```bash
-# 分发公钥到三个节点（密码: ops123）
-ssh-copy-id ops@192.168.50.11
-ssh-copy-id ops@192.168.50.12
-ssh-copy-id ops@192.168.50.13
-
-# 验证免密
-ssh ops@192.168.50.12 hostname  # 应返回 node-02
-ssh ops@192.168.50.13 hostname  # 应返回 node-03
-```
-
-### Step 6: 宿主机 SSH 连接配置
-
-> 从此步骤起，宿主机可以通过 SSH 直接连接集群。**Phase 2 及后续所有阶段均使用宿主机 SSH 操作集群**，不再需要 `wsl -d` 命令。
-
-#### 6.1 验证宿主机到 node-01 的 SSH 连通性
-
-```powershell
-# 在 Windows PowerShell 中执行
-# 先确保 start-all-nodes.ps1 已运行（节点保持运行中）
-
-# 测试 SSH 连接（使用密码 ops123）
-ssh ops@192.168.50.11
-# 输入密码 ops123，应成功进入 node-01
-exit
-```
-
-> 如果连接超时，检查 Step 0 中的路由是否添加成功：
-> ```powershell
-> route print 192.168.50.*
-> ```
-> 如果没有路由，重新执行 `route add 192.168.50.0 mask 255.255.255.0 <wsl-gateway-ip>`。
-
-#### 6.2 生成宿主机 SSH 密钥并配置免密
-
-```powershell
-# 在 Windows PowerShell 中执行
-
-# 1. 生成密钥对（如果没有的话）
-if (-not (Test-Path "$env:USERPROFILE\.ssh\id_ed25519")) {
-    ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\id_ed25519" -N '""' -q
-}
-
-# 2. 将公钥上传到 node-01（密码: ops123）
-$type = Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub"
-wsl -d k3s-node-01 -u root -- bash -c "mkdir -p /home/ops/.ssh && echo '$type' >> /home/ops/.ssh/authorized_keys && chmod 700 /home/ops/.ssh && chmod 600 /home/ops/.ssh/authorized_keys && chown -R ops:ops /home/ops/.ssh"
-
-# 3. 验证免密登录
-ssh ops@192.168.50.11 hostname
-# 应直接返回 node-01，无需密码
-```
-
-#### 6.3 配置 SSH 别名（可选但推荐）
-
-在 Windows 上创建/编辑 `C:\Users\<你的用户名>\.ssh\config`：
-
-```ssh-config
-# K3s Cluster Nodes
-Host node-01
-    HostName 192.168.50.11
-    User ops
-    IdentityFile ~/.ssh/id_ed25519
-
-Host node-02
-    HostName 192.168.50.12
-    User ops
-    IdentityFile ~/.ssh/id_ed25519
-
-Host node-03
-    HostName 192.168.50.13
-    User ops
-    IdentityFile ~/.ssh/id_ed25519
-```
-
-配置后可直接 `ssh node-01` 连接。
-
-#### 6.4 验证宿主机 SSH 连接
-
-```powershell
-ssh node-01 hostname   # 应返回 node-01
-ssh node-02 hostname   # 应返回 node-02
-ssh node-03 hostname   # 应返回 node-03
-```
-
-> **从现在起，所有集群操作通过宿主机 SSH 进行：**
-> ```powershell
-> ssh node-01           # 连接到 Ansible 控制节点
-> ```
-> 不再使用 `wsl -d k3s-node-01`。
-
-### Step 7: 上传 Ansible 项目并运行 Playbook
-
-> Ansible 项目通过 SCP 上传到 node-01 本地目录，模拟真实集群的文件部署方式。
-
-#### 7.1 上传 Ansible 项目到 node-01
-
-```powershell
-# 在 Windows PowerShell 中执行
-# 通过 SCP 上传（利用 Step 6 配置的 SSH 免密）
-
-# 创建远程目录
-ssh node-01 "mkdir -p /home/ops/k3s-cluster"
-
-# 上传 ansible 目录（使用相对路径，工作目录已为项目根目录）
-scp -r ansible node-01:/home/ops/k3s-cluster/
-
-# 设置权限（避免 world-writable 警告）
-ssh node-01 "chmod 700 /home/ops/k3s-cluster/ansible && chmod 600 /home/ops/k3s-cluster/ansible/ansible.cfg /home/ops/k3s-cluster/ansible/inventory.ini /home/ops/k3s-cluster/ansible/group_vars/all.yml && chmod 600 /home/ops/k3s-cluster/ansible/playbooks/*.yml"
-```
-
-<details>
-<summary><b>📖 上传脚本的最佳实践——SCP 场景（补充说明）</b></summary>
-
-Step 7.1 已经使用了 `scp` 上传，符合最佳实践中的传输方式。但对于 **Playbook 执行**，可以进一步优化为带日志记录和返回值检查的模式：
-
-```bash
-# ── SSH 可用后的标准执行流程（以 Playbook 为例）──
-
-# 1. 本地 YAML 语法检查（上传前确认 Playbook 无语法错误）
-#    （需要本地安装 ansible-lint 或使用 ansible-playbook --syntax-check）
-ansible-playbook --syntax-check -i inventory.ini playbooks/00-init-system.yml
-
-# 2. SCP 上传（已完成，见上方）
-
-# 3. 远程执行 Playbook，输出同时写入日志
-ssh -t node-01 "bash -c 'cd /home/ops/k3s-cluster/ansible && ansible-playbook -i inventory.ini playbooks/00-init-system.yml 2>&1 | tee /home/ops/k3s-cluster/logs/ansible-$(date +%Y%m%d_%H%M%S).log'"
-
-# 4. 检查返回值
-if [ $? -eq 0 ]; then
-    echo "Playbook 执行成功"
-else
-    echo "Playbook 执行失败，请查看日志"
-fi
-```
-
-**当前流程 vs 增强模式**：
-
-| 维度 | 当前流程（7.2） | 增强模式 |
-|------|---------------|---------|
-| 语法检查 | 无 | `--syntax-check` 上传前验证 |
-| 执行日志 | 仅终端输出 | `tee` 落盘，可追溯 |
-| 返回值 | 人工观察 | `$?` 自动判断 |
-| 日志路径 | 无 | `/home/ops/k3s-cluster/logs/ansible-YYYYMMDD_HHMMSS.log` |
-
-> **Phase 2+ 建议**：后续所有 Playbook 执行采用增强模式，确保每次操作都有日志可追溯。可在 node-01 上编写 wrapper 脚本封装此模式。
-
-</details>
-
-#### 7.2 安装 Ansible 并运行 Playbook
-
-```powershell
-# 通过 SSH 连接到 node-01
-ssh node-01
-```
-
-```bash
-# 在 node-01 上以 ops 用户操作
-
-# 安装 Ansible
-sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible
-
-# 运行基础初始化 Playbook
-cd /home/ops/k3s-cluster/ansible
-ansible-playbook -i inventory.ini playbooks/00-init-system.yml
-```
-
-### Step 8: 验证
-
-```bash
-# 通过宿主机 SSH 连接到 node-01
-# 在 Windows PowerShell 中: ssh node-01
-
-# Ansible 连通性测试
-cd /home/ops/k3s-cluster/ansible
+# Ansible 连通性
 ansible all -i inventory.ini -m ping
 
-# 逐项验证
+# 节点状态
 ansible all -i inventory.ini -m command -a "hostname"
 ansible all -i inventory.ini -m command -a "free -h"
-ansible all -i inventory.ini -m command -a "ip addr show eth0"
 ansible all -i inventory.ini -m command -a "sysctl net.ipv4.ip_forward"
 ansible all -i inventory.ini -m command -a "timedatectl"
 ```
 
 ---
 
-## 后续阶段操作模式
+## 5. Ansible Playbook 适配清单
 
-> **从 Phase 2 起，所有集群操作遵循以下模式：**
+现有 Playbook 写于 WSL2 + Ubuntu 环境，迁移到 ECS + Alibaba Cloud Linux 3 需以下改动：
 
-```powershell
-# 1. 宿主机 SSH 连接到 node-01（Ansible 控制节点）
-ssh node-01
+### 5.1 `group_vars/all.yml`
 
-# 2. 在 node-01 上执行 Ansible Playbook / kubectl / helm 等操作
-cd /home/ops/k3s-cluster/ansible
-ansible-playbook -i inventory.ini playbooks/xx-xxx.yml
+| 修改项 | 旧值（WSL2） | 新值（ECS） |
+|--------|-------------|-------------|
+| `node_ips` | 192.168.50.11/12/13 | 172.26.5.101/102/103（Terraform 输出） |
+| `cluster_hosts` | WSL2 IP 列表 | ECS 内网 IP 列表 |
+| `base_packages` | `apt` 包名（含 `openssh-server`、`python3-passlib`） | `dnf` 包名（移除 `openssh-server`、`software-properties-common`，加 `python3-passlib` → `python3-libselinux`） |
+| `k3s_flannel_iface` | `eth0` | `eth0`（ECS 默认，保留） |
+
+### 5.2 `inventory.ini`
+
+| 修改项 | 旧值 | 新值 |
+|--------|------|------|
+| 节点名 | `node-01/02/03` | `k3s-node-1/2/3` |
+| `ansible_host` | 192.168.50.1X | 172.26.5.10X（Terraform 输出） |
+| 节点分组 | `k3s_cluster`（混合） | `k3s_servers`（3 server，无 agent） |
+
+### 5.3 `00-init-system.yml`
+
+| 原 (Ubuntu/apt) | 改为 (Alibaba Cloud Linux 3/dnf) | 说明 |
+|-----------------|----------------------------------|------|
+| `apt: update_cache=true` | `dnf: update_cache=true` | 包管理器 |
+| `apt: upgrade=dist` | `dnf: name=* state=latest` | 系统升级 |
+| `apt: name={{ base_packages }}` | `dnf: name={{ base_packages }}` | 安装软件包 |
+| `service: name=ssh` | `service: name=sshd` | SSH 服务名 |
+| `groups: sudo` | `groups: wheel` | sudo 组名 |
+| WSL2 IP alias service | **删除** | ECS 有独立 IP，不需要 |
+| `Configure sshd ListenAddress` | **删除** | ECS 不需要绑定特定 IP |
+| `Verify IP alias` post_task | **删除** | 不再需要 |
+
+> **跨平台建议**：可用 `ansible_os_family` 变量做条件判断，同时支持 Ubuntu（Debian）和 Alibaba Cloud Linux（RedHat），体现 Playbook 的跨平台能力（简历加分）。
+
+### 5.4 `k3s-config.yaml.j2`
+
+```yaml
+# HA 模式配置（3 server + embedded etcd）
+node-ip: {{ node_ips[inventory_hostname] }}
+node-name: {{ inventory_hostname }}
+flannel-iface: eth0
+
+write-kubeconfig-mode: "0644"
+tls-san:
+  - {{ node_ips[inventory_hostname] }}
+
+# etcd HA: 首节点初始化集群，其余节点 join
+cluster-init: {% if inventory_hostname == k3s_first_server %}true{% else %}false{% endif %}
+server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
 ```
 
-- 脚本和配置文件通过 `scp` 上传到节点本地，不在节点上通过 `/mnt/d/` 访问宿主机文件
-- 所有运维操作通过 SSH 远程执行，与真实非 WSL 集群保持一致
-- `wsl -d` 命令仅用于 Phase 1 的环境引导（创建 distro、首次初始化），后续不再使用
+> 不再需要 `disable-apiserver-lb`——ECS 有独立 loopback，无端口冲突。
+
+### 5.5 `01-deploy-k3s.yml`
+
+| 改动项 | 说明 |
+|--------|------|
+| HA 模式安装 | server 节点添加 `--cluster-init`（首节点）和 `--server`（join 节点） |
+| 删除 `disable-apiserver-lb` | 不再需要 |
+| 删除二进制复制逻辑 | ECS 有公网/NAT，可直接下载 |
+| 删除 WSL2 前置检查 | IP 别名检查等不再需要 |
+| 新增 etcd 健康检查 | `k3s etcd-snapshot` 验证 |
 
 ---
 
-## 下一步
+## 6. 成本估算
 
-Phase 1 完成后，进入 **Phase 2: K3s 集群部署**——通过宿主机 SSH 连接 node-01，使用 Ansible Playbook 在 3 节点上部署 K3s HA 集群（embedded etcd）。
+| 项目 | 月费 | 说明 |
+|------|------|------|
+| ECS ecs.e-c1m1.large × 3 | ~135 元 | 经济型 e 实例，包月 |
+| ESSD Entry 40G × 3 | 含在实例费中 | — |
+| 安全组 | 免费 | — |
+| 公网带宽（现有服务器） | 已有 | 复用现有 |
+| NAT 网关（可选） | ~25 元 | 如需新实例自行下载包 |
+| **最小方案** | **~135 元/月** | 3 ECS only |
+| **完整方案** | **~160 元/月** | + NAT 网关 |
+
+> 项目完成后可随时 `terraform destroy` 释放所有资源，停止计费。
+
+---
+
+## 7. 验证清单
+
+Terraform apply 完成后，逐项验证：
+
+- [ ] `terraform output` 显示 3 个内网 IP
+- [ ] 通过 Jump Host SSH 免密登录 3 台新实例
+- [ ] `hostname` 返回 k3s-node-1 / k3s-node-2 / k3s-node-3
+- [ ] `free -h` 中 Swap 全为 0
+- [ ] `sysctl net.ipv4.ip_forward` 返回 1
+- [ ] `timedatectl` 时区为 Asia/Shanghai
+- [ ] `chronyc tracking` 时间同步正常
+- [ ] `cat /etc/sudoers.d/ops` 包含 NOPASSWD
+- [ ] `ansible all -m ping` 三节点全部 SUCCESS
+- [ ] 安全组规则在阿里云控制台可查
+- [ ] `terraform show` 显示所有资源状态正常
+
+---
+
+## 8. 风险与注意事项
+
+| 风险 | 影响 | 缓解措施 |
+|------|------|---------|
+| 经济型 e 实例 CPU 性能基线 | 突发负载时降频 | 部署阶段可临时升级规格，完成后降回 |
+| Alibaba Cloud Linux 3 兼容性 | K3s 某些特性可能差异 | K3s 官方支持 RHEL 8+，兼容性良好 |
+| Terraform state 文件安全 | 含资源 ID，误删风险 | 使用 `terraform backend` 远程存储（OSS） |
+| SSH 密钥丢失 | 无法登录实例 | 阿里云密钥对 + cloud-init 公钥双重保障 |
+| cloud-init 执行失败 | 节点未初始化 | 检查 `/var/log/cloud-init-output.log` |
+
+---
+
+## 9. 下一步
+
+Phase 1 完成后，进入 **Phase 2: K3s HA 集群部署**——在现有 ECS（Jump Host）上通过 Ansible Playbook 在 3 节点上部署 K3s 3-Server HA + embedded etcd 集群。
