@@ -1,9 +1,9 @@
-# Phase 1: Terraform IaC — 阿里云 ECS 实例创建
+# Phase 1: Terraform IaC — 阿里云 ECS 基础设施创建
 
-> 日期：2026-07-20
-> 状态：计划待实施
-> 前置文档：[aliyun-ecs-k3s-plan.md](aliyun-ecs-k3s-plan.md)（方案调研）
-> 配置细化：[terraform-config-detail.md](terraform-config-detail.md)（分步创建 + 余额保护）
+> 日期：2026-07-15 ~ 2026-07-21
+> 状态：**已完成**
+> 前置文档：[aliyun-ecs-k3s-plan.md](aliyun-ecs-k3s-plan.md)（方案调研，部分已过时）
+> 配置细化：[terraform-config-detail.md](terraform-config-detail.md)（分步创建策略，已过时，待清理）
 
 ---
 
@@ -11,102 +11,102 @@
 
 ### 1.1 目标
 
-使用 **Terraform** 在阿里云杭州地域创建 ECS 实例，组成 K3s HA 集群的物理基础设施。复用现有 VPC / vSwitch，通过 cloud-init 完成系统初始化。
+使用 **Terraform** 在阿里云杭州地域创建全新的 VPC + 3 台 ECS 实例，组成 K3s HA 集群的物理基础设施。通过 cloud-init 完成系统初始化，node-01 绑定按量 EIP 提供互联网出口和 SSH 直连。
 
-### 1.2 产出物
+### 1.2 方案变更说明
 
-| 产出 | 路径 | 说明 |
-|------|------|------|
-| Terraform 项目 | `terraform/` | main.tf / variables.tf / outputs.tf / user-data.sh |
-| ECS 实例 | 阿里云控制台 | ecs.e-c1m1.large，Alibaba Cloud Linux 3 |
-| 安全组 | 阿里云控制台 | K3s 集群安全组（见 §2.4） |
-| Ansible Playbook 适配 | `ansible/` | inventory / group_vars / 00-init-system.yml 适配 |
-| 本计划文档 | `docs/phase-1-plan.md` | 你正在看的这个 |
+> ⚠️ 原方案（[aliyun-ecs-k3s-plan.md](aliyun-ecs-k3s-plan.md)）计划复用现有 SWAS 实例的 VPC (172.16.0.0/12) 和 Jump Host。实施时发现 **SWAS 与 ECS API 隔离，VPC 不互通**，因此改为新建 VPC + 全新 ECS 方案。
+
+| 项目 | 原方案（已废弃） | 实际方案 |
+|------|----------------|---------|
+| VPC | 复用 SWAS VPC (172.16.0.0/12) | **新建 VPC (192.168.0.0/16)** |
+| vSwitch | 复用 vsw-bp171csb7bkm1n0156f3b (cn-hangzhou-i) | **新建 vswitch (192.168.1.0/24, cn-hangzhou-h)** |
+| node-01 | 复用现有 SWAS 实例 (import) | **新建 ECS** |
+| 公网访问 | SWAS 做 Jump Host (47.114.124.150) | **node-01 绑按量 EIP (116.62.168.245)** |
+| 实例规格 | 3 台全部 2C2G | **node-01 2C2G, node-02/03 2C4G**（Phase 3 前升级） |
+| 密钥对 | 控制台预创建 | **Terraform 自动创建并导入公钥** |
+
+### 1.3 产出物
+
+| 产出 | 路径 / 资源 | 说明 |
+|------|------------|------|
+| Terraform 项目 | `terraform/` | main.tf / variables.tf / outputs.tf / user-data.sh / setenv.sh |
+| VPC | vpc-bp1yjb43u1ht8jdoqdw31 | 192.168.0.0/16, cn-hangzhou |
+| VSwitch | vsw-bp13ew0svbez0hez2gvhi | 192.168.1.0/24, cn-hangzhou-h |
+| 安全组 | sg-bp1807co8efnr2upllnb | K3s 集群安全组 |
+| SSH 密钥对 | k3s-cluster-key | Terraform 创建，导入本机公钥 |
+| ECS × 3 | 见 §2.1 | node-01 + EIP, node-02/03 纯内网 |
+| EIP | 116.62.168.245 | 绑定 node-01, PayByTraffic |
 
 ---
 
-## 2. 基础设施规划
+## 2. 基础设施现状
 
 ### 2.1 节点规划
 
-| 节点 | 实例类型 | vCPU | 内存 | 系统盘 | 内网 IP | K3s 角色 |
-|------|---------|------|------|--------|---------|---------|
-| k3s-node-01 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.x | server + etcd |
-| k3s-node-02 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.y | server + etcd |
-| k3s-node-03 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 172.26.5.z | server + etcd |
-| **现有 ECS** | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB | 172.26.5.95 | Ansible 控制节点 + Jump Host |
+| 节点 | 实例类型 | vCPU | 内存 | 系统盘 | 内网 IP | EIP | K3s 角色 |
+|------|---------|------|------|--------|---------|-----|---------|
+| k3s-node-01 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 192.168.1.228 | 116.62.168.245 | server + etcd |
+| k3s-node-02 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.230 | — | server + etcd |
+| k3s-node-03 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.229 | — | server + etcd |
 
-> 新实例不分配公网 IP，通过现有 ECS（47.114.124.150）做 Jump Host SSH 访问。
-> 内网 IP 由 VPC DHCP 分配，Terraform 创建后通过 `outputs` 输出。
+> node-01 保持 2C2G（仅跑 K3s 控制面 + FluxCD + Velero，不跑 MySQL）。
+> node-02/03 在 Phase 3 前升级到 2C4G（跑 MySQL 物理机主从，2C2G 内存余量 <200MB 有 OOM 风险）。
 
 ### 2.2 网络拓扑
 
 ```
                         ┌─────────────────────────────────────────────────┐
-                        │              阿里云 VPC (172.16.0.0/12)           │
-                        │              cn-hangzhou / cn-hangzhou-i         │
+                        │         阿里云 VPC (192.168.0.0/16)               │
+                        │         cn-hangzhou / cn-hangzhou-h               │
                         │                                                 │
    Internet             │   ┌──────────────────────────────────────┐      │
-      │                 │   │   vSwitch: vsw-bp171csb7bkm1n0156f3b │      │
-      │                 │   │                                      │      │
-      ▼                 │   │  ┌─────────────┐  ┌─────────────┐    │      │
-  ┌────────┐            │   │  │  k3s-node-1 │  │  k3s-node-2 │    │      │
-  │公网 IP │──── SSH ───┼──▶│  │ 172.26.5.x  │  │ 172.26.5.y  │    │      │
-  │47.114  │  (Jump)    │   │  │ K3s Server  │  │ K3s Server  │    │      │
-  │.124.150│            │   │  │ + etcd      │  │ + etcd      │    │      │
-  └────────┘            │   │  └──────┬──────┘  └──────┬──────┘    │      │
-       │                │   │         │    VPC 内网     │            │      │
-  ┌────────┐            │   │         └───────┬────────┘            │      │
-  │现有ECS  │            │   │         ┌───────┴──────┐              │      │
-  │astrbot │            │   │         │  k3s-node-3  │              │      │
-  │napcat  │            │   │         │ 172.26.5.z   │              │      │
-  └────────┘            │   │         │ K3s Server   │              │      │
-                        │   │         │ + etcd       │              │      │
-                        │   │         └──────────────┘              │      │
+      │                 │   │  VSwitch: 192.168.1.0/24             │      │
+      ▼                 │   │                                      │      │
+  ┌────────┐            │   │  ┌─────────────┐  ┌─────────────┐   │      │
+  │  EIP   │──── SSH ───┼──▶│  │  k3s-node-01│  │ k3s-node-02 │   │      │
+  │116.62  │  直连 22   │   │  │ 192.168.1.228│  │192.168.1.230│   │      │
+  │.168.245│            │   │  │ K3s Server  │  │ K3s Server  │   │      │
+  └────────┘            │   │  │ + etcd      │  │ + etcd      │   │      │
+       │ 互联网出口      │   │  │ 2C2G 40G    │  │ 2C4G 40G    │   │      │
+       ▼                │   │  └──────┬──────┘  └──────┬──────┘   │      │
+  (K3s/镜像下载)        │   │         │   VPC 内网      │          │      │
+                        │   │         └───────┬────────┘          │      │
+                        │   │         ┌───────┴──────┐           │      │
+                        │   │         │  k3s-node-03 │           │      │
+                        │   │         │192.168.1.229 │           │      │
+                        │   │         │ K3s Server   │           │      │
+                        │   │         │ + etcd       │           │      │
+                        │   │         │ 2C4G 40G     │           │      │
+                        │   │         └──────────────┘           │      │
                         │   └──────────────────────────────────────┘      │
                         └─────────────────────────────────────────────────┘
 ```
 
-### 2.3 现有资源（复用，Terraform data 引用）
+### 2.3 安全组规则
 
-| 资源 | ID | 获取方式 |
-|------|----|---------|
-| VPC | vpc-bp1oq6uale5r4id9beupn | `data "alicloud_vpcs" "existing"` |
-| vSwitch | vsw-bp171csb7bkm1n0156f3b | `data "alicloud_vswitchs" "existing"` |
-| 现有 ECS | 172.26.5.95 | 已有，不需创建 |
-
-### 2.4 安全组规则
+安全组 `sg-bp1807co8efnr2upllnb`，所有节点共用：
 
 | 方向 | 协议 | 端口 | 源/目标 | 用途 |
 |------|------|------|---------|------|
-| 入 | TCP | 22 | 172.26.5.95/32（现有 ECS） | SSH 管理（仅 Jump Host） |
-| 入 | TCP | 6443 | 0.0.0.0/0 | K3s API Server |
-| 入 | TCP | 2379-2380 | 同安全组内 | etcd 集群通信 |
-| 入 | TCP | 10250 | 同安全组内 | kubelet |
-| 入 | UDP | 8472 | 同安全组内 | flannel VXLAN |
+| 入 | TCP | 22 | 0.0.0.0/0 | SSH（EIP 直连 + SWAS 内网互通跳板） |
+| 入 | TCP | 6443 | 0.0.0.0/0 | K3s API Server（kubectl 远程访问） |
+| 入 | TCP | 2379-2380 | 192.168.0.0/16 | etcd 集群通信（仅 VPC 内部） |
+| 入 | TCP | 10250 | 192.168.0.0/16 | kubelet（仅 VPC 内部） |
+| 入 | UDP | 8472 | 192.168.0.0/16 | flannel VXLAN（仅 VPC 内部） |
 | 入 | TCP | 80, 443 | 0.0.0.0/0 | 业务 Ingress |
 | 出 | ALL | ALL | 0.0.0.0/0 | 默认允许 |
 
-> etcd 端口（2379/2380）务必限制为同安全组内，**不要对公网开放**。
+> SSH 开放 0.0.0.0/0 是因为 node-01 有 EIP 直连，同时 SWAS 内网互通也需要访问。
+> etcd 端口严格限制在 VPC CIDR 内，不对公网开放。
 
-### 2.5 操作系统
+### 2.4 操作系统
 
 | 镜像 | 说明 |
 |------|------|
-| Alibaba Cloud Linux 3.2104 | RHEL 8 兼容，内核 5.10，免费使用阿里云内网 yum 源 |
+| Alibaba Cloud Linux 3.2104 LTS 64位 | RHEL 8 兼容，内核 5.10，免费使用阿里云内网 yum 源 |
 
-> K3s 官方支持 RHEL 8+，Alibaba Cloud Linux 3 基于 platform:al8，兼容性良好。
-
-### 2.6 公有云核心优势
-
-| 特性 | 说明 |
-|------|------|
-| **独立网络命名空间** | 每台 ECS 拥有独立的 loopback 和网络栈，K3s supervisor（6444）、etcd（2379）、containerd（10010）均无端口冲突 |
-| **内网互通** | 同 VPC 同 vSwitch 的 ECS 实例通过内网 IP 互通，免费且低延迟 |
-| **安全组隔离** | 声明式网络安全规则，精确控制端口暴露范围 |
-| **cloud-init 自动化** | 实例首次启动自动完成系统初始化（用户创建、swap 关闭、内核参数等） |
-| **IaC 声明式管理** | Terraform 管理全部基础设施，`plan` 预览、`apply` 创建、`destroy` 释放，状态可追溯 |
-| **弹性计费** | 按量付费随时释放，包月更优惠；项目完成后 `terraform destroy` 即停计费 |
+> Terraform 镜像查询 name_regex: `^aliyun_3_x64_20G_alibase_`（非 `alibaba_cloud_linux_3.*`，阿里云镜像命名规则）。
 
 ---
 
@@ -116,515 +116,213 @@
 
 ```
 terraform/
-├── main.tf           # 主配置：provider + data + 资源定义
-├── variables.tf      # 输入变量
-├── outputs.tf        # 输出（ECS 内网 IP、实例 ID 等）
-├── user-data.sh      # cloud-init 初始化脚本
-├── terraform.tfvars  # 变量赋值（不含敏感信息）
-└── README.md         # 使用说明
+├── main.tf              # 主配置：provider + VPC + 安全组 + 3 实例 + EIP
+├── variables.tf         # 输入变量（含分步创建控制 + 升级规格变量）
+├── outputs.tf           # 输出（IP、实例 ID、Ansible inventory 片段）
+├── user-data.sh         # cloud-init 初始化脚本
+├── terraform.tfvars     # 变量赋值（含 ops 公钥，.gitignore 排除）
+├── setenv.sh            # 阿里云凭证环境变量加载脚本（.gitignore 排除）
+├── terraform.tfstate    # 状态文件（.gitignore 排除）
+└── .terraform.lock.hcl  # Provider 版本锁定
 ```
 
-### 3.2 `variables.tf` — 输入变量
+### 3.2 关键设计决策
+
+#### 3.2.1 分步创建控制（余额保护）
+
+不使用 `count` 一次性创建 3 台，而是为每个节点单独定义 resource block + 布尔控制变量：
 
 ```hcl
-# ── 阿里云 Provider 配置 ──
-variable "alicloud_region" {
-  description = "阿里云地域"
-  type        = string
-  default     = "cn-hangzhou"
-}
+variable "create_node_01" { default = false }
+variable "create_node_02" { default = false }
+variable "create_node_03" { default = false }
+variable "create_eip"     { default = false }
+```
 
-# ── 复用现有网络 ──
-variable "vpc_id" {
-  description = "现有 VPC ID"
-  type        = string
-  default     = "vpc-bp1oq6uale5r4id9beupn"
-}
+**原因**：
+1. 每台 ECS ~45 元/月，逐台创建可控制成本风险
+2. 首台创建后验证 cloud-init 正确性，再创建后续节点
+3. 单独 resource block 便于 `terraform apply -target` 精确操作单台实例
+4. 后续升级规格时也可 `-target` 单台操作，保持 etcd quorum
 
-variable "vswitch_id" {
-  description = "现有 vSwitch ID"
-  type        = string
-  default     = "vsw-bp171csb7bkm1n0156f3b"
-}
+#### 3.2.2 VPC 新建（非复用 SWAS VPC）
 
-# ── ECS 实例配置 ──
-variable "instance_type" {
-  description = "ECS 实例规格"
-  type        = string
-  default     = "ecs.e-c1m1.large"
-}
+原方案计划复用现有 SWAS 的 VPC (172.16.0.0/12)，实施时发现 SWAS 与 ECS API 隔离，VPC 不互通。改为新建独立 VPC (192.168.0.0/16)，所有资源 Terraform 原生管理。
 
-variable "image_id" {
-  description = "镜像 ID（Alibaba Cloud Linux 3）"
-  type        = string
-  default     = ""  # 留空则通过 data 自动查询最新
-}
+#### 3.2.3 EIP 按量计费
 
-variable "system_disk_size" {
-  description = "系统盘大小（GB）"
-  type        = number
-  default     = 40
-}
+node-01 绑定按量 EIP (PayByTraffic, 0.8 元/GB)，用途：
+- SSH 直连（无需 Jump Host）
+- 互联网出口（下载 K3s 二进制、容器镜像）
+- kubectl 远程访问 API Server
 
-variable "system_disk_category" {
-  description = "系统盘类型"
-  type        = string
-  default     = "cloud_essd_entry"
-}
+预估费用：安装阶段一次性 ~3 元，后续 < 1 元/月。
 
-# ── 节点配置 ──
-variable "node_name_prefix" {
-  description = "节点名前缀"
-  type        = string
-  default     = "k3s-node"
+#### 3.2.4 密钥对 Terraform 管理
+
+使用 `alicloud_ecs_key_pair` 资源自动创建密钥对并导入本机公钥，无需控制台手动创建：
+
+```hcl
+resource "alicloud_ecs_key_pair" "k3s" {
+  key_pair_name = var.ssh_key_name
+  public_key    = var.ops_pubkey
 }
+```
+
+> 注意：用 `key_pair_name`（非已废弃的 `key_name`）。
+
+### 3.3 `variables.tf` — 关键变量
+
+```hcl
+# ── 网络配置 ──
+variable "vpc_cidr"      { default = "192.168.0.0/16" }
+variable "vswitch_cidr"  { default = "192.168.1.0/24" }
+variable "zone_id"       { default = "cn-hangzhou-h" }
+
+# ── 实例规格 ──
+variable "instance_type"          { default = "ecs.e-c1m1.large" }  # 2C2G, node-01
+variable "instance_type_upgraded" { default = "ecs.e-c1m2.large" }  # 2C4G, node-02/03
+
+# ── 镜像 ──
+# 留空则自动查询：name_regex = "^aliyun_3_x64_20G_alibase_"
+
+# ── 分步创建控制 ──
+variable "create_node_01" { default = false }
+variable "create_node_02" { default = false }
+variable "create_node_03" { default = false }
+variable "create_eip"     { default = false }
 
 # ── SSH 密钥 ──
-variable "ssh_key_name" {
-  description = "SSH 密钥对名称（需在阿里云控制台预先创建）"
-  type        = string
-  default     = "k3s-cluster-key"
-}
+variable "ssh_key_name" { default = "k3s-cluster-key" }
+variable "ops_pubkey"   { default = "" }  # 在 terraform.tfvars 中设置
 
-# ── Jump Host ──
-variable "jump_host_ip" {
-  description = "Jump Host 内网 IP（现有 ECS，用于安全组 SSH 限制）"
-  type        = string
-  default     = "172.26.5.95"
-}
-
-# ── Ops 用户 ──
-variable "ops_user" {
-  description = "运维用户名"
-  type        = string
-  default     = "ops"
-}
-
-variable "ops_pubkey" {
-  description = "Ops 用户的 SSH 公钥（用于 cloud-init 注入）"
-  type        = string
-  default     = ""  # 在 terraform.tfvars 中设置
-}
+# ── 用户 ──
+variable "ops_user" { default = "ops" }
 ```
 
-### 3.3 `main.tf` — 主配置
+### 3.4 `main.tf` — 资源架构
 
-```hcl
-terraform {
-  required_providers {
-    alicloud = {
-      source  = "aliyun/alicloud"
-      version = "~> 1.220"
-    }
-  }
-}
-
-provider "alicloud" {
-  region = var.alicloud_region
-}
-
-# ── 引用现有 VPC ──
-data "alicloud_vpcs" "existing" {
-  ids = [var.vpc_id]
-}
-
-# ── 引用现有 vSwitch ──
-data "alicloud_vswitchs" "existing" {
-  ids = [var.vswitch_id]
-}
-
-# ── 查询最新 Alibaba Cloud Linux 3 镜像（如未指定 image_id）──
-data "alicloud_images" "acl3" {
-  count       = var.image_id == "" ? 1 : 0
-  name_regex  = "^alibaba_cloud_linux_3.*2104.*x64"
-  most_recent = true
-  owners      = "system"
-}
-
-locals {
-  image_id    = var.image_id != "" ? var.image_id : data.alicloud_images.acl3[0].images[0].id
-  vpc_cidr    = data.alicloud_vpcs.existing.vpcs[0].cidr_block
-}
-
-# ── 安全组 ──
-resource "alicloud_security_group" "k3s" {
-  name        = "k3s-cluster-sg"
-  description = "Security group for K3s HA cluster"
-  vpc_id      = var.vpc_id
-}
-
-# SSH: 仅允许 Jump Host
-resource "alicloud_security_group_rule" "ssh" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "22/22"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = "${var.jump_host_ip}/32"
-}
-
-# K3s API Server: 公网可访问（可收紧为 VPC CIDR）
-resource "alicloud_security_group_rule" "k3s_api" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "6443/6443"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = "0.0.0.0/0"
-}
-
-# etcd: 仅安全组内部
-resource "alicloud_security_group_rule" "etcd_client" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "2379/2379"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = local.vpc_cidr
-}
-
-resource "alicloud_security_group_rule" "etcd_peer" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "2380/2380"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = local.vpc_cidr
-}
-
-# kubelet: 仅安全组内部
-resource "alicloud_security_group_rule" "kubelet" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "10250/10250"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = local.vpc_cidr
-}
-
-# flannel VXLAN: 仅安全组内部
-resource "alicloud_security_group_rule" "flannel" {
-  type              = "ingress"
-  ip_protocol       = "udp"
-  port_range        = "8472/8472"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = local.vpc_cidr
-}
-
-# Ingress HTTP/HTTPS: 公网可访问
-resource "alicloud_security_group_rule" "http" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "80/80"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = "0.0.0.0/0"
-}
-
-resource "alicloud_security_group_rule" "https" {
-  type              = "ingress"
-  ip_protocol       = "tcp"
-  port_range        = "443/443"
-  security_group_id = alicloud_security_group.k3s.id
-  cidr_ip           = "0.0.0.0/0"
-}
-
-# ── ECS 实例 ──
-# 注：实际创建数量由 terraform-config-detail.md 中的分步策略控制
-resource "alicloud_instance" "k3s_nodes" {
-  count                     = var.node_count
-  instance_name             = "${var.node_name_prefix}-${count.index + 1}"
-  host_name                 = "${var.node_name_prefix}-${count.index + 1}"
-  instance_type             = var.instance_type
-  image_id                  = local.image_id
-  security_groups           = [alicloud_security_group.k3s.id]
-  vswitch_id                = var.vswitch_id
-  system_disk_size          = var.system_disk_size
-  system_disk_category      = var.system_disk_category
-  internet_max_bandwidth_out = 0  # 不分配公网 IP
-  key_name                  = var.ssh_key_name  # 阿里云密钥对（root 用户）
-
-  # cloud-init user-data
-  user_data = templatefile("${path.module}/user-data.sh", {
-    ops_user   = var.ops_user
-    ops_pubkey = var.ops_pubkey
-  })
-
-  tags = {
-    Project    = "k3s-cluster"
-    Phase      = "phase-1"
-    NodeRole   = "server-etcd"
-    NodeIndex  = tostring(count.index + 1)
-  }
-}
+```
+alicloud_vpc.k3s                    ── 新建 VPC
+├── alicloud_vswitch.k3s            ── 新建 VSwitch
+├── alicloud_security_group.k3s     ── 安全组
+│   └── alicloud_security_group_rule.* (8 条规则)
+├── alicloud_ecs_key_pair.k3s       ── SSH 密钥对
+├── alicloud_instance.k3s_node_01   ── ECS node-01 (2C2G, count=create_node_01)
+├── alicloud_instance.k3s_node_02   ── ECS node-02 (2C4G, count=create_node_02)
+├── alicloud_instance.k3s_node_03   ── ECS node-03 (2C4G, count=create_node_03)
+├── alicloud_eip_address.k3s_node_01        ── EIP (count=create_eip)
+└── alicloud_eip_association.k3s_node_01    ── EIP 绑定 node-01
 ```
 
-> **分步创建策略**：实际执行时不会一次性 `count=3`，而是通过 `terraform-config-detail.md`
-> 中描述的分步方案，先复用现有实例、再逐台创建，每步均需用户确认。
+> 每个实例 resource block 使用 `count = var.create_node_XX ? 1 : 0` 控制是否创建。
+> outputs.tf 中用 `length(alicloud_instance.k3s_node_XX) > 0` 判断是否有值。
 
-### 3.4 `outputs.tf` — 输出
-
-```hcl
-output "k3s_node_private_ips" {
-  description = "K3s 节点内网 IP（用于 Ansible inventory）"
-  value = {
-    for i, instance in alicloud_instance.k3s_nodes :
-    "k3s-node-${i + 1}" => instance.private_ip
-  }
-}
-
-output "k3s_node_instance_ids" {
-  description = "ECS 实例 ID"
-  value = {
-    for i, instance in alicloud_instance.k3s_nodes :
-    "k3s-node-${i + 1}" => instance.id
-  }
-}
-
-output "security_group_id" {
-  description = "安全组 ID"
-  value       = alicloud_security_group.k3s.id
-}
-
-output "jump_host_ssh_command" {
-  description = "通过 Jump Host 连接节点的示例命令"
-  value = [
-    for i, instance in alicloud_instance.k3s_nodes :
-    "ssh -J ops@47.114.124.150 ops@${instance.private_ip}"
-  ]
-}
-```
-
-### 3.5 `user-data.sh` — cloud-init 初始化脚本
+### 3.5 `user-data.sh` — cloud-init 初始化
 
 ```bash
 #!/bin/bash
-# cloud-init user-data for K3s cluster nodes
-# Runs as root on first boot
-
-set -euo pipefail
-
-OPS_USER="${ops_user}"
-OPS_PUBKEY="${ops_pubkey}"
-
-# ── 1. 关闭 swap ──
-swapoff -a
-sed -i '/swap/d' /etc/fstab
-
-# ── 2. 内核参数 ──
-cat > /etc/sysctl.d/99-k3s.conf << 'EOF'
-net.ipv4.ip_forward=1
-net.bridge.bridge-nf-call-iptables=1
-net.bridge.bridge-nf-call-ip6tables=1
-EOF
-modprobe br_netfilter 2>/dev/null || true
-sysctl --system
-
-# ── 3. 安装基础软件包（dnf, RHEL 系）──
-dnf install -y curl wget vim git net-tools iproute2 chrony python3 python3-pip \
-    gnupg ca-certificates tar gzip
-
-# ── 4. 时区 & 时间同步 ──
-timedatectl set-timezone Asia/Shanghai
-systemctl enable --now chronyd
-
-# ── 5. 创建 ops 用户 ──
-useradd -m -s /bin/bash -G wheel "${OPS_USER}"
-echo "${OPS_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${OPS_USER}"
-chmod 0440 "/etc/sudoers.d/${OPS_USER}"
-
-# ── 6. 配置 ops SSH 公钥 ──
-mkdir -p "/home/${OPS_USER}/.ssh"
-echo "${OPS_PUBKEY}" > "/home/${OPS_USER}/.ssh/authorized_keys"
-chmod 700 "/home/${OPS_USER}/.ssh"
-chmod 600 "/home/${OPS_USER}/.ssh/authorized_keys"
-chown -R "${OPS_USER}:${OPS_USER}" "/home/${OPS_USER}/.ssh"
-
-# ── 7. 配置 /etc/hosts（节点间解析）──
-# 注：内网 IP 在 cloud-init 运行时可能还未完全分配
-# Ansible Playbook 00 会补充完整的 /etc/hosts
-echo "# K3s cluster hosts (managed by Ansible)" >> /etc/hosts
-
-# ── 8. 禁用 firewalld（K3s 自行管理网络规则）──
-systemctl disable --now firewalld 2>/dev/null || true
-
-# ── 9. 标记 cloud-init 完成 ──
-touch /tmp/cloud-init-k3s-done
+# cloud-init user-data for K3s cluster nodes (templatefile 渲染)
+# 关键步骤：
+# 1. 关闭 swap
+# 2. 内核参数 (ip_forward, bridge-nf-call-iptables)
+# 3. 安装基础包 (dnf)
+# 4. 时区 Asia/Shanghai + chronyd
+# 5. 创建 ops 用户 + sudo NOPASSWD
+# 6. 配置 ops SSH 公钥
+# 7. 禁用 firewalld
+# 8. 标记完成 /tmp/cloud-init-k3s-done
 ```
 
-### 3.6 `terraform.tfvars` — 变量赋值
-
-```hcl
-# 在此处填入你的 SSH 公钥（用于 ops 用户免密登录）
-ops_pubkey = "ssh-ed25519 AAAAC3Nz... your_email@example.com"
-```
-
-> 不要将 `terraform.tfvars` 提交到 Git。在 `.gitignore` 中排除。
+> **踩坑修复**：Alibaba Cloud Linux 3 (RHEL 8 系) 包名 `iproute` 而非 `iproute2`（Debian 系）。cloud-init 首次执行时 `dnf install iproute2` 失败，改为 `iproute` 后通过。
 
 ---
 
-## 4. 实施步骤
+## 4. 实施时间线
 
-### Step 0: 前置准备
+### Phase A: 免费资源（2026-07-15）
 
-```bash
-# 1. 安装 Terraform（本地 Windows 或现有 ECS）
-#    下载地址: https://developer.hashicorp.com/terraform/downloads
-
-# 2. 配置阿里云凭证（环境变量）
-export ALICLOUD_ACCESS_KEY="your-access-key"
-export ALICLOUD_SECRET_KEY="your-secret-key"
-
-# 3. 在阿里云控制台创建 SSH 密钥对 "k3s-cluster-key"（用于 root 用户）
-#    ECS 控制台 → 密钥对 → 创建密钥对 → 下载 .pem 文件
-
-# 4. 在 terraform.tfvars 中填入 ops 用户的 SSH 公钥
-```
-
-### Step 1: Terraform 初始化 & 预览
+> 费用：0 元
 
 ```bash
-cd terraform/
-
-# 初始化 Provider
-terraform init
-
-# 预览将创建的资源
-terraform plan
-```
-
-### Step 2: 创建基础设施
-
-> **分步创建**：实际执行遵循 [terraform-config-detail.md](terraform-config-detail.md) 的分步策略，
-> 不会一次性创建全部实例。每一步涉及费用的操作均需用户确认。
-
-```bash
-# 执行创建（约 2-3 分钟/台）
+# terraform.tfvars: 全部 false
 terraform apply
-
-# 记录输出的内网 IP（后续 Ansible inventory 需要）
-terraform output -json k3s_node_private_ips
 ```
 
-预期输出示例：
-```json
-{
-  "k3s-node-1": "172.26.5.101",
-  "k3s-node-2": "172.26.5.102",
-  "k3s-node-3": "172.26.5.103"
-}
-```
+创建内容：
+- VPC: vpc-bp1yjb43u1ht8jdoqdw31 (192.168.0.0/16)
+- VSwitch: vsw-bp13ew0svbez0hez2gvhi (192.168.1.0/24, cn-hangzhou-h)
+- 安全组: sg-bp1807co8efnr2upllnb + 8 条规则
+- SSH 密钥对: k3s-cluster-key
 
-### Step 3: 验证 cloud-init 完成
+### Phase B: node-01 + EIP（2026-07-15）
+
+> 费用：+~45 元/月 (ECS) + 按量 EIP
 
 ```bash
-# 通过 Jump Host SSH 到新实例
-ssh -J ops@47.114.124.150 ops@172.26.5.101
-
-# 验证初始化
-hostname                    # k3s-node-1
-free -h                     # Swap 全为 0
-sysctl net.ipv4.ip_forward  # 返回 1
-timedatectl                 # Asia/Shanghai
-which dnf                   # /usr/bin/dnf
-ls /tmp/cloud-init-k3s-done # 文件存在
+# terraform.tfvars: create_node_01 = true, create_eip = true
+terraform apply
 ```
 
-### Step 4: 配置 Ansible Inventory
+创建内容：
+- ECS: i-bp18iw6uhnyntovdgn02, 内网 192.168.1.228
+- EIP: 116.62.168.245 (PayByTraffic, 10Mbps 带宽上限)
 
-根据 `terraform output` 的实际 IP，更新 `ansible/inventory.ini`：
+**踩坑**：cloud-init 首次执行失败 — `dnf install iproute2` 包名错误。修复 `user-data.sh` 中 `iproute2` → `iproute`，后续节点不受影响。
 
-```ini
-[k3s_servers]
-k3s-node-1 ansible_host=172.26.5.101
-k3s-node-2 ansible_host=172.26.5.102
-k3s-node-3 ansible_host=172.26.5.103
+### Phase D+E: node-02 + node-03（2026-07-15）
 
-[k3s_cluster:children]
-k3s_servers
-
-[k3s_cluster:vars]
-ansible_user=ops
-ansible_ssh_private_key_file=~/.ssh/id_ed25519
-ansible_python_interpreter=/usr/bin/python3
-```
-
-### Step 5: 运行 Ansible 系统初始化
+> 费用：+~90 元/月 (2 台 ECS)
 
 ```bash
-# 在现有 ECS（Jump Host）上运行
-cd /home/ops/k8s-project/ansible
-ansible-playbook -i inventory.ini playbooks/00-init-system.yml
+# terraform.tfvars: create_node_02 = true, create_node_03 = true
+terraform apply
 ```
 
-### Step 6: 验证
+创建内容：
+- node-02: i-bp13rih84qlww3p8gqag, 192.168.1.230
+- node-03: i-bp1fszqhjmzkyi7jt9f5, 192.168.1.229
+
+cloud-init 自动完成（iproute 修复已生效），无需手动干预。
+
+### Phase 1 完成
+
+3 节点全部 cloud-init 通过，可 SSH 直连 node-01 (EIP) 或通过 node-01 跳转到 node-02/03。
+
+### 后续：node-02/03 升级 2C4G（2026-07-21）
+
+> 费用：+~40-60 元/月 (规格升级差价)
+
+Phase 3 前为 MySQL 物理机主从预留内存余量，将 node-02/03 从 2C2G 升级到 2C4G：
 
 ```bash
-# Ansible 连通性
-ansible all -i inventory.ini -m ping
-
-# 节点状态
-ansible all -i inventory.ini -m command -a "hostname"
-ansible all -i inventory.ini -m command -a "free -h"
-ansible all -i inventory.ini -m command -a "sysctl net.ipv4.ip_forward"
-ansible all -i inventory.ini -m command -a "timedatectl"
+# variables.tf 新增 instance_type_upgraded
+# main.tf node-02/03 改用 var.instance_type_upgraded
+# 分步 apply，保持 etcd quorum：
+terraform apply -target=alicloud_instance.k3s_node_03  # 先升 node-03
+terraform apply -target=alicloud_instance.k3s_node_02  # 再升 node-02
 ```
+
+每台停机 < 30 秒，etcd 2/3 quorum 全程未断，K3s 自动重连恢复 Ready。
 
 ---
 
-## 5. Ansible Playbook 配置规范
+## 5. 验证清单
 
-ECS 实例使用 Alibaba Cloud Linux 3（RHEL 8 系），Ansible Playbook 需按以下规范配置：
+Phase 1 完成后逐项验证（全部通过）：
 
-### 5.1 `group_vars/all.yml`
-
-| 配置项 | 值 | 说明 |
-|--------|-----|------|
-| `node_ips` | 172.26.5.101/102/103 | VPC 内网 IP（Terraform 输出） |
-| `cluster_hosts` | ECS 内网 IP 列表 | /etc/hosts 节点间解析 |
-| `base_packages` | `dnf` 包名 | `curl wget vim git net-tools iproute2 chrony python3 python3-pip python3-libselinux` |
-| `k3s_flannel_iface` | `eth0` | ECS 默认网卡名 |
-
-### 5.2 `inventory.ini`
-
-| 配置项 | 值 |
-|--------|-----|
-| 节点名 | `k3s-node-1/2/3` |
-| `ansible_host` | 172.26.5.10X（Terraform 输出） |
-| 节点分组 | `k3s_servers`（3 server，无 agent） |
-
-### 5.3 `00-init-system.yml`
-
-| 配置项 | 值 | 说明 |
-|--------|-----|------|
-| 包管理器 | `dnf` | Alibaba Cloud Linux 3 使用 dnf |
-| 系统升级 | `dnf: name=* state=latest` | 全量更新 |
-| SSH 服务名 | `sshd` | RHEL 系服务名 |
-| sudo 组名 | `wheel` | RHEL 系 sudo 组 |
-| firewalld | `systemctl disable --now firewalld` | 禁用，K3s 自行管理网络规则 |
-
-> **跨平台建议**：可用 `ansible_os_family` 变量做条件判断，同时支持 Debian 系和 RedHat 系，
-> 体现 Playbook 的跨平台能力（简历加分）。
-
-### 5.4 `k3s-config.yaml.j2`
-
-```yaml
-# HA 模式配置（3 server + embedded etcd）
-node-ip: {{ node_ips[inventory_hostname] }}
-node-name: {{ inventory_hostname }}
-flannel-iface: eth0
-
-write-kubeconfig-mode: "0644"
-tls-san:
-  - {{ node_ips[inventory_hostname] }}
-
-# etcd HA: 首节点初始化集群，其余节点 join
-cluster-init: {% if inventory_hostname == k3s_first_server %}true{% else %}false{% endif %}
-server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
-```
-
-### 5.5 `01-deploy-k3s.yml`
-
-| 配置项 | 说明 |
-|--------|------|
-| HA 模式安装 | server 节点添加 `--cluster-init`（首节点）和 `--server`（join 节点） |
-| 公网下载 | ECS 可通过 NAT/公网直接下载 K3s 二进制，无需离线复制 |
-| etcd 健康检查 | `k3s etcd-snapshot` 验证 etcd 集群状态 |
-| 幂等性检查 | `which k3s` 判断是否已安装，避免重复执行 |
+- [x] `terraform output` 显示 3 个内网 IP + 1 个 EIP
+- [x] `ssh k3s-node-01` 直连成功（通过 EIP）
+- [x] `ssh k3s-node-01` → `ssh 192.168.1.230` 跳转 node-02 成功
+- [x] `hostname` 返回 k3s-node-01 / 02 / 03
+- [x] `free -h` 中 Swap 全为 0
+- [x] `sysctl net.ipv4.ip_forward` 返回 1
+- [x] `timedatectl` 时区为 Asia/Shanghai
+- [x] `chronyc tracking` 时间同步正常
+- [x] `cat /etc/sudoers.d/ops` 包含 NOPASSWD
+- [x] `ls /tmp/cloud-init-k3s-done` 文件存在
+- [x] 安全组规则在阿里云控制台可查
+- [x] `terraform plan` 无 pending changes（state 与配置一致）
 
 ---
 
@@ -632,48 +330,75 @@ server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
 
 | 项目 | 月费 | 说明 |
 |------|------|------|
-| ECS ecs.e-c1m1.large × 3 | ~135 元 | 经济型 e 实例，包月 |
+| ECS ecs.e-c1m1.large × 1 (node-01) | ~45 元 | 2C2G |
+| ECS ecs.e-c1m2.large × 2 (node-02/03) | ~110 元 | 2C4G，升级后 |
 | ESSD Entry 40G × 3 | 含在实例费中 | — |
-| 安全组 | 免费 | — |
-| 公网带宽（现有服务器） | 已有 | 复用现有 |
-| NAT 网关（可选） | ~25 元 | 如需新实例自行下载包 |
-| **最小方案** | **~135 元/月** | 3 ECS only |
-| **完整方案** | **~160 元/月** | + NAT 网关 |
+| EIP (PayByTraffic) | < 1 元 | 0.8 元/GB，仅安装阶段有流量 |
+| VPC / VSwitch / 安全组 / 密钥对 | 免费 | — |
+| **合计** | **~156 元/月** | — |
 
 > 项目完成后可随时 `terraform destroy` 释放所有资源，停止计费。
 
 ---
 
-## 7. 验证清单
+## 7. SSH 连接方式
 
-Terraform apply 完成后，逐项验证：
+### 7.1 本机 SSH 配置
 
-- [ ] `terraform output` 显示 3 个内网 IP
-- [ ] 通过 Jump Host SSH 免密登录 3 台新实例
-- [ ] `hostname` 返回 k3s-node-1 / k3s-node-2 / k3s-node-3
-- [ ] `free -h` 中 Swap 全为 0
-- [ ] `sysctl net.ipv4.ip_forward` 返回 1
-- [ ] `timedatectl` 时区为 Asia/Shanghai
-- [ ] `chronyc tracking` 时间同步正常
-- [ ] `cat /etc/sudoers.d/ops` 包含 NOPASSWD
-- [ ] `ansible all -m ping` 三节点全部 SUCCESS
-- [ ] 安全组规则在阿里云控制台可查
-- [ ] `terraform show` 显示所有资源状态正常
+```
+# ~/.ssh/config
+Host k3s-node-01
+    HostName 116.62.168.245
+    User ops
+    IdentityFile ~/.ssh/id_rsa
+
+Host k3s-node-02
+    HostName 192.168.1.230
+    User ops
+    IdentityFile ~/.ssh/id_rsa
+    ProxyJump k3s-node-01
+
+Host k3s-node-03
+    HostName 192.168.1.229
+    User ops
+    IdentityFile ~/.ssh/id_rsa
+    ProxyJump k3s-node-01
+```
+
+### 7.2 连接命令
+
+```bash
+ssh k3s-node-01    # 直连 EIP
+ssh k3s-node-02    # 通过 node-01 跳转
+ssh k3s-node-03    # 通过 node-01 跳转
+```
 
 ---
 
-## 8. 风险与注意事项
+## 8. 踩坑记录
 
-| 风险 | 影响 | 缓解措施 |
+| 问题 | 原因 | 解决方案 |
 |------|------|---------|
-| 经济型 e 实例 CPU 性能基线 | 突发负载时降频 | 部署阶段可临时升级规格，完成后降回 |
-| Alibaba Cloud Linux 3 兼容性 | K3s 某些特性可能差异 | K3s 官方支持 RHEL 8+，兼容性良好 |
-| Terraform state 文件安全 | 含资源 ID，误删风险 | 使用 `terraform backend` 远程存储（OSS） |
-| SSH 密钥丢失 | 无法登录实例 | 阿里云密钥对 + cloud-init 公钥双重保障 |
-| cloud-init 执行失败 | 节点未初始化 | 检查 `/var/log/cloud-init-output.log` |
+| cloud-init 执行失败 | `iproute2` 是 Debian 系包名，RHEL 系叫 `iproute` | user-data.sh 改 `iproute2` → `iproute` |
+| SWAS VPC 不可复用 | SWAS 与 ECS API 隔离，VPC 不互通 | 新建独立 VPC (192.168.0.0/16) |
+| 镜像 name_regex 不匹配 | `alibaba_cloud_linux_3.*` 不是阿里云镜像命名格式 | 改为 `^aliyun_3_x64_20G_alibase_` |
+| `key_name` 已废弃 | alicloud provider 更新，`key_name` deprecated | 改用 `key_pair_name` |
+| node-02/03 内存不足 | 2C2G 跑 MySQL 主从余量 <200MB，OOM 风险 | 升级到 2C4G (ecs.e-c1m2.large) |
 
 ---
 
-## 9. 下一步
+## 9. 版本信息
 
-Phase 1 完成后，进入 **Phase 2: K3s HA 集群部署**——在现有 ECS（Jump Host）上通过 Ansible Playbook 在 3 节点上部署 K3s 3-Server HA + embedded etcd 集群。
+| 工具 | 版本 |
+|------|------|
+| Terraform | 1.15.8 (winget) |
+| alicloud provider | 1.285.0 |
+| 阿里云 CLI | 未使用（纯 Terraform） |
+| 操作系统 | Alibaba Cloud Linux 3.2104 LTS |
+| K3s | v1.36.2+k3s1（Phase 2 部署） |
+
+---
+
+## 10. 下一步
+
+Phase 1 完成后，进入 **Phase 2: K3s 3-Server HA 集群部署** — 通过 Ansible Playbook 在 3 节点上部署 K3s embedded etcd HA 集群。详见 [phase-2-k3s-deploy.md](phase-2-k3s-deploy.md)。
