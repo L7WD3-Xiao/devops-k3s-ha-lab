@@ -93,7 +93,7 @@
 | **metrics-server** | 默认安装 |
 | **LB / 公网入口** | 阿里云 SLB（可选）或 DNS 轮询 |
 
-> ⚠️ 与 WSL2 方案的关键区别：ECS 每台有独立网络命名空间，`127.0.0.1` 不共享，
+> ECS 每台拥有独立网络命名空间，`127.0.0.1` 不共享，
 > K3s supervisor（6444）、etcd（2379）、containerd（10010）均无端口冲突。
 
 ### 2.4 网络与安全
@@ -125,7 +125,7 @@
 
 ## 3. Ansible Playbook 适配清单
 
-现有 Playbook 写于 WSL2 + Ubuntu 环境，迁移到 ECS + Alibaba Cloud Linux 3 需以下改动：
+ECS 实例使用 Alibaba Cloud Linux 3（RHEL 8 系），Ansible Playbook 需按以下规范配置：
 
 ### 3.1 `group_vars/all.yml`
 
@@ -142,8 +142,8 @@ k3s_cluster_mode: ha          # 新增：ha | single
 k3s_first_server: k3s-node-1
 k3s_first_server_ip: 172.26.5.x
 
-# 3. 删除 WSL2 专用变量
-# k3s_flannel_iface: eth0     # 可保留或删除（ECS 默认 eth0）
+# 3. flannel 网卡（ECS 默认 eth0）
+k3s_flannel_iface: eth0
 ```
 
 ### 3.2 `inventory.ini`
@@ -178,7 +178,6 @@ aliyun ansible_host=172.26.5.95
 | `apt: name={{ base_packages }}` | `dnf: name={{ base_packages }}` |
 | `service: name=ssh` | `service: name=sshd` |
 | `groups: sudo` | `groups: wheel` |
-| WSL2 IP alias service | **删除**（ECS 有独立 IP） |
 | `chrony` 包名 | `chrony`（一致） |
 
 > 可用 Ansible 的 `ansible_os_family` 变量做条件判断，同时支持 Ubuntu 和 RHEL 系，
@@ -203,16 +202,14 @@ cluster-init: {% if inventory_hostname == k3s_first_server %}true{% else %}false
 server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
 ```
 
-> 不再需要 `disable-apiserver-lb`——ECS 有独立 loopback，无端口冲突。
+> ECS 有独立 loopback，无端口冲突，无需额外配置。
 
 ### 3.5 `01-deploy-k3s.yml` 适配
 
 | 改动项 | 说明 |
 |--------|------|
 | HA 模式安装 | server 节点添加 `--cluster-init`（首节点）和 `--server`（join 节点） |
-| 删除 `disable-apiserver-lb` | 不再需要 |
-| 删除二进制复制逻辑 | ECS 有公网/NAT，可直接下载 |
-| 删除 WSL2 前置检查 | IP 别名检查等不再需要 |
+| 公网下载 | ECS 可通过 NAT/公网直接下载 K3s 二进制，无需离线复制 |
 | 新增 etcd 健康检查 | `k3s etcd-snapshot` 验证 |
 
 ## 4. 实施步骤
@@ -282,17 +279,17 @@ kubectl get nodes
 > 最小方案即可完成简历项目目标。NAT 和 SLB 为可选项，如果新实例需要自行下载包
 > 或需要外部访问 API Server 才需要。
 
-## 6. 方案对比总结
+## 6. 方案优势总结
 
-| 维度 | WSL2（已废弃） | Hyper-V VM | **阿里云 ECS（推荐）** |
-|------|---------------|------------|----------------------|
-| 网络隔离 | ❌ 共享 loopback | ✅ 独立 | ✅ 独立 |
-| K3s 架构 | 1S+2A（无 HA） | 3S HA | **3S HA** |
-| 简历含金量 | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| 公有云经验 | 无 | 无 | **有（面试加分）** |
-| 部署难度 | 中（坑多） | 中 | **低（Playbook 已有）** |
-| 月成本 | 0 | 0 | ~135 元 |
-| 额外收益 | 无 | 无 | **可部署业务对外访问** |
+| 维度 | **阿里云 ECS** |
+|------|----------------------|
+| 网络隔离 | ✅ 每台 ECS 独立网络命名空间，无 loopback 冲突 |
+| K3s 架构 | **3 Server HA + embedded etcd** |
+| 简历含金量 | ⭐⭐⭐⭐⭐（公有云 + IaC + HA） |
+| 公有云经验 | **有（面试加分）** |
+| 部署难度 | 低（Terraform 声明式 + Ansible Playbook 自动化） |
+| 月成本 | ~135 元（项目完成后可随时释放） |
+| 额外收益 | **可部署业务对外访问，公网 IP + SLB** |
 
 > 花费 ~135 元/月获得一个真正的公有云 HA K8s 集群，简历项目含金量直接拉满。
 
