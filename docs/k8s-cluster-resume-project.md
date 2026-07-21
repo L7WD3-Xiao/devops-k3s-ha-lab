@@ -176,6 +176,10 @@
 | 备份 | Velero (集群资源) + xtrabackup (MySQL) | 双备份策略 |
 | 业务 | Go (Gin) + Redis + MySQL | 编译快、镜像小、适合容器化 |
 
+> ArgoCD 实际采用 FluxCD，内存占用更少
+>
+> Harbor 实际采用 Aliyun ACR，内存占用更少
+
 ---
 
 ## 五、业务场景设计（短链服务）
@@ -260,7 +264,7 @@ CREATE TABLE url_mapping (
 | Phase 2 | K3s 集群部署 | Ansible Playbook 一键部署 K3s HA 集群 |
 | Phase 3 | 数据层部署 | MySQL 物理机主从 + Redis StatefulSet |
 | Phase 4 | 应用部署 | 短链服务 Go 代码 + Dockerfile + Helm Chart |
-| Phase 5 | CI/CD 流水线 | GitHub Actions + Harbor + ArgoCD |
+| Phase 5 | CI/CD 流水线 | GitHub Actions + Aliyun ACR + FluxCD |
 | Phase 6 | 安全加固 | RBAC + NetworkPolicy + Trivy |
 | Phase 7 | 备份容灾 | Velero + xtrabackup + 恢复演练 |
 | Phase 8 | 文档整理 | README、架构文档、部署手册 |
