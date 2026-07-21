@@ -6,6 +6,9 @@
 # Backend: uses existing MySQL master (192.168.1.230) for metadata storage.
 # Trade-off: if master fails, Orchestrator loses backend access temporarily,
 # but can still promote the slave. Backend data is GTID-replicated to slave.
+#
+# Passwords are injected via K8s Secret (mysql-credentials) + init container.
+# ConfigMap only contains __PLACEHOLDER__ tokens.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -13,13 +16,13 @@ metadata:
   name: orchestrator-config
   namespace: data-layer
 data:
-  orchestrator.conf.json: |
+  orchestrator.conf.json.template: |
     {
       "Debug": false,
       "Listen": ":3000",
 
       "MySQLTopologyUser": "orchestrator",
-      "MySQLTopologyPassword": "Orchestrator@2026!",
+      "MySQLTopologyPassword": "__ORCHESTRATOR_PASSWORD__",
       "MySQLTopologyHost": "192.168.1.230",
       "MySQLTopologyPort": 3306,
 
@@ -27,7 +30,7 @@ data:
       "MySQLOrchestratorPort": 3306,
       "MySQLOrchestratorDatabase": "orchestrator",
       "MySQLOrchestratorUser": "orchestrator",
-      "MySQLOrchestratorPassword": "Orchestrator@2026!",
+      "MySQLOrchestratorPassword": "__ORCHESTRATOR_PASSWORD__",
 
       "DiscoverByShowSlaveHosts": false,
       "InstancePollSeconds": 5,
@@ -103,9 +106,33 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: node-01
+      initContainers:
+        - name: render-config
+          image: openarkcode/orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              sed \
+                -e "s|__ORCHESTRATOR_PASSWORD__|${ORCHESTRATOR_PASSWORD}|g" \
+                /template/orchestrator.conf.json.template > /rendered/orchestrator.conf.json
+              echo "[init] orchestrator.conf.json rendered successfully"
+          env:
+            - name: ORCHESTRATOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: orchestrator-password
+          volumeMounts:
+            - name: config-template
+              mountPath: /template
+            - name: rendered-config
+              mountPath: /rendered
       containers:
         - name: orchestrator
           image: openarkcode/orchestrator:latest
+          imagePullPolicy: IfNotPresent
           command: ["/usr/local/orchestrator/orchestrator"]
           args: ["-c", "/etc/orchestrator.conf.json", "http"]
           ports:
@@ -124,10 +151,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
-            - name: config
+            - name: rendered-config
               mountPath: /etc/orchestrator.conf.json
               subPath: orchestrator.conf.json
       volumes:
-        - name: config
+        - name: config-template
           configMap:
             name: orchestrator-config
+        - name: rendered-config
+          emptyDir: {}

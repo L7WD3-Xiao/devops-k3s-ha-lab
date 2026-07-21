@@ -5,3 +5,6 @@ kubeconfig.yaml
 
 # Ansible group_vars 含真实密码（脱敏模板 all.yml.example 入库）
 ansible/group_vars/all.yml
+
+# K8s Secret 含真实密码（脱敏模板 secret.yaml.example 入库）
+k8s/data-layer/secret.yaml

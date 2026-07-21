@@ -7,6 +7,9 @@
 #   read_only=OFF → hostgroup 1 (writer)
 #   read_only=ON  → hostgroup 2 (reader)
 # When Orchestrator promotes a new master, ProxySQL adjusts automatically.
+#
+# Passwords are injected via K8s Secret (mysql-credentials) + init container.
+# ConfigMap only contains __PLACEHOLDER__ tokens.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -14,8 +17,9 @@ metadata:
   name: proxysql-config
   namespace: data-layer
 data:
-  proxysql.cnf: |
+  proxysql.cnf.template: |
     # ProxySQL config — parsed by libconfig (string values MUST be quoted)
+    # Rendered from template by init container (passwords injected from Secret)
     datadir="/var/lib/proxysql"
     errorlog="/var/lib/proxysql/proxysql.log"
 
@@ -45,7 +49,7 @@ data:
       commands_stats=true
       sessions_sort=true
       monitor_username="monitor"
-      monitor_password="Monitor@2026!"
+      monitor_password="__MONITOR_PASSWORD__"
     }
 
     mysql_servers=
@@ -56,7 +60,7 @@ data:
 
     mysql_users=
     (
-      { username="shortlink" , password="Shortlink@2026!" , default_hostgroup=1 , active=1 }
+      { username="shortlink" , password="__SHORTLINK_PASSWORD__" , default_hostgroup=1 , active=1 }
     )
 
     mysql_query_rules=
@@ -106,6 +110,34 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: node-01
+      initContainers:
+        - name: render-config
+          image: proxysql/proxysql:2.7.2
+          command:
+            - sh
+            - -c
+            - |
+              sed \
+                -e "s|__MONITOR_PASSWORD__|${MONITOR_PASSWORD}|g" \
+                -e "s|__SHORTLINK_PASSWORD__|${SHORTLINK_PASSWORD}|g" \
+                /template/proxysql.cnf.template > /rendered/proxysql.cnf
+              echo "[init] proxysql.cnf rendered successfully"
+          env:
+            - name: MONITOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: monitor-password
+            - name: SHORTLINK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: shortlink-password
+          volumeMounts:
+            - name: config-template
+              mountPath: /template
+            - name: rendered-config
+              mountPath: /rendered
       containers:
         - name: proxysql
           image: proxysql/proxysql:2.7.2
@@ -127,14 +159,16 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           volumeMounts:
-            - name: config
+            - name: rendered-config
               mountPath: /etc/proxysql.cnf
               subPath: proxysql.cnf
             - name: data
               mountPath: /var/lib/proxysql
       volumes:
-        - name: config
+        - name: config-template
           configMap:
             name: proxysql-config
+        - name: rendered-config
+          emptyDir: {}
         - name: data
           emptyDir: {}
