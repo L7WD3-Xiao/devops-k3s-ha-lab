@@ -1,0 +1,117 @@
+---
+# Sentinel StatefulSet: 3 sentinel pods for HA failover
+# initContainer resolves redis-0 hostname → IP (Alpine musl libc getaddrinfo bug workaround)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-headless
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  clusterIP: None
+  selector:
+    app: sentinel
+  ports:
+    - port: 26379
+      name: sentinel
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  selector:
+    app: sentinel
+  ports:
+    - port: 26379
+      name: sentinel
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sentinel
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  serviceName: sentinel-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sentinel
+  template:
+    metadata:
+      labels:
+        app: sentinel
+    spec:
+      # Spread Sentinel pods across different nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: sentinel
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: init-sentinel
+          image: redis:7-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "[Sentinel Init] Resolving redis-0 hostname..."
+              # Wait for DNS resolution (Alpine musl libc getaddrinfo fails at Sentinel config parse time)
+              MASTER_IP=""
+              for i in $(seq 1 30); do
+                MASTER_IP=$(nslookup redis-0.redis-headless.data-layer.svc.cluster.local 2>/dev/null \
+                  | awk '/^Address: / && !/10.43.0.10/ {print $2}' | head -1)
+                if [ -n "$MASTER_IP" ]; then
+                  break
+                fi
+                echo "[Sentinel Init] Waiting for DNS... ($i/30)"
+                sleep 2
+              done
+              if [ -z "$MASTER_IP" ]; then
+                echo "[Sentinel Init] ERROR: Failed to resolve redis-0 hostname"
+                exit 1
+              fi
+              echo "[Sentinel Init] redis-0 resolved to $MASTER_IP"
+              # Replace hostname with IP in sentinel.conf
+              sed "s/redis-0.redis-headless.data-layer.svc.cluster.local/$MASTER_IP/g" \
+                /etc/redis-config/sentinel.conf > /sentinel-data/sentinel.conf
+              echo "[Sentinel Init] sentinel.conf generated:"
+              cat /sentinel-data/sentinel.conf
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis-config
+            - name: sentinel-data
+              mountPath: /sentinel-data
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          command: ["redis-server", "/sentinel-data/sentinel.conf", "--sentinel"]
+          ports:
+            - containerPort: 26379
+              name: sentinel
+          resources:
+            requests:
+              cpu: 25m
+              memory: 25Mi
+            limits:
+              cpu: 100m
+              memory: 50Mi
+          volumeMounts:
+            - name: sentinel-data
+              mountPath: /sentinel-data
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+        - name: sentinel-data
+          emptyDir: {}

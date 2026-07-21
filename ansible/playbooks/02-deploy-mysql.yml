@@ -1,0 +1,215 @@
+---
+# 02-deploy-mysql.yml
+# Deploy MySQL 8.0 GTID master-slave replication
+# Master: node-02 (192.168.1.230), server-id=1
+# Slave:  node-03 (192.168.1.229), server-id=2
+#
+# Prerequisites:
+#   - MySQL 8.0 RPMs at {{ mysql_rpm_dir }}/ on target nodes
+#   - perl installed on target nodes
+#
+# Run: ansible-playbook -i inventory.ini playbooks/02-deploy-mysql.yml
+
+# ══════════════════════════════════════════════════════════════
+# Play 1: Install MySQL 8.0 on all database nodes
+# ══════════════════════════════════════════════════════════════
+- name: Install MySQL 8.0 on database nodes
+  hosts: mysql
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Set MySQL role and server-id (master)
+      set_fact:
+        mysql_role: master
+        mysql_server_id: 1
+      when: inventory_hostname in groups['mysql_master']
+
+    - name: Set MySQL role and server-id (slave)
+      set_fact:
+        mysql_role: slave
+        mysql_server_id: 2
+      when: inventory_hostname in groups['mysql_slave']
+
+  tasks:
+    - name: Import MySQL GPG key
+      rpm_key:
+        key: "{{ mysql_rpm_dir }}/RPM-GPG-KEY-mysql-2023"
+        state: present
+
+    - name: Check if MySQL server is already installed
+      command: rpm -q mysql-community-server
+      register: mysql_rpm_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Install MySQL 8.0 RPMs from local packages
+      shell: "dnf localinstall -y {{ mysql_rpm_dir }}/mysql-community-*.rpm"
+      when: mysql_rpm_check.rc != 0
+
+    - name: Deploy my.cnf configuration
+      template:
+        src: templates/my.cnf.j2
+        dest: /etc/my.cnf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      register: my_cnf
+
+    - name: Ensure slow query log file exists
+      file:
+        path: /var/log/mysql-slow.log
+        owner: mysql
+        group: mysql
+        mode: '0644'
+        state: touch
+
+    - name: Start and enable mysqld service
+      service:
+        name: mysqld
+        state: started
+        enabled: true
+
+    - name: Restart mysqld to apply custom config
+      service:
+        name: mysqld
+        state: restarted
+      when: my_cnf.changed
+
+    - name: Wait for mysqld to be ready
+      wait_for:
+        port: 3306
+        host: 127.0.0.1
+        timeout: 30
+
+    - name: Check if root password is already configured
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SELECT 1;' 2>&1"
+      register: root_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Get temporary root password from log
+      shell: "grep 'temporary password' /var/log/mysqld.log 2>/dev/null | tail -1 | awk '{print $NF}'"
+      register: mysql_temp_password
+      changed_when: false
+      when: root_check.rc != 0
+
+    - name: Set root password
+      shell: >-
+        mysql -u root -p'{{ mysql_temp_password.stdout }}' --connect-expired-password
+        -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+      when: root_check.rc != 0 and mysql_temp_password.stdout | length > 0
+
+    - name: Show MySQL version
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SELECT VERSION();' 2>/dev/null"
+      register: mysql_version_output
+      changed_when: false
+
+    - name: Display MySQL version
+      debug:
+        msg: "{{ mysql_version_output.stdout_lines[1] | default('unknown') }} (role: {{ mysql_role }}, server-id: {{ mysql_server_id }})"
+
+# ══════════════════════════════════════════════════════════════
+# Play 2: Configure Master (create database, table, users)
+# ══════════════════════════════════════════════════════════════
+- name: Configure MySQL Master
+  hosts: mysql_master
+  become: true
+
+  tasks:
+    - name: Check if application database exists
+      shell: >-
+        mysql -u root -p'{{ mysql_root_password }}'
+        -e "SHOW DATABASES LIKE '{{ mysql_app_db }}';" 2>/dev/null
+      register: db_check
+      changed_when: false
+
+    - name: Render database initialization SQL
+      template:
+        src: templates/init-db.sql.j2
+        dest: /tmp/init-db.sql
+      when: db_check.stdout | length == 0
+
+    - name: Execute database initialization
+      shell: "mysql -u root -p'{{ mysql_root_password }}' < /tmp/init-db.sql"
+      when: db_check.stdout | length == 0
+
+    - name: Clean up temporary SQL file
+      file:
+        path: /tmp/init-db.sql
+        state: absent
+
+    - name: Show master status (GTID, binlog position)
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SHOW MASTER STATUS\\G' 2>/dev/null"
+      register: master_status
+      changed_when: false
+
+    - name: Display master status
+      debug:
+        var: master_status.stdout_lines
+
+    - name: Show created databases
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SHOW DATABASES;' 2>/dev/null"
+      register: db_list
+      changed_when: false
+
+    - name: Display databases
+      debug:
+        var: db_list.stdout_lines
+
+# ══════════════════════════════════════════════════════════════
+# Play 3: Configure Slave (GTID replication from Master)
+# ══════════════════════════════════════════════════════════════
+- name: Configure MySQL Slave replication
+  hosts: mysql_slave
+  become: true
+
+  tasks:
+    - name: Check current replication status
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SHOW REPLICA STATUS\\G' 2>/dev/null"
+      register: replica_status
+      changed_when: false
+
+    - name: Configure GTID replication to Master
+      shell: >-
+        mysql -u root -p'{{ mysql_root_password }}' -e "
+        STOP REPLICA;
+        CHANGE REPLICATION SOURCE TO
+          SOURCE_HOST='{{ mysql_master_ip }}',
+          SOURCE_USER='{{ mysql_repl_user }}',
+          SOURCE_PASSWORD='{{ mysql_repl_password }}',
+          SOURCE_AUTO_POSITION=1,
+          GET_SOURCE_PUBLIC_KEY=1;
+        START REPLICA;"
+      when: "'Replica_IO_Running: Yes' not in replica_status.stdout"
+
+    - name: Wait for replication to initialize
+      wait_for:
+        timeout: 5
+
+    - name: Verify replication status
+      shell: "mysql -u root -p'{{ mysql_root_password }}' -e 'SHOW REPLICA STATUS\\G' 2>/dev/null"
+      register: replica_verify
+      changed_when: false
+
+    - name: Display replica status
+      debug:
+        var: replica_verify.stdout_lines
+
+    - name: Verify database replicated to slave
+      shell: >-
+        mysql -u root -p'{{ mysql_root_password }}'
+        -e "SHOW DATABASES LIKE '{{ mysql_app_db }}';" 2>/dev/null
+      register: slave_db_check
+      changed_when: false
+
+    - name: Confirm replication success
+      debug:
+        msg: "Database '{{ mysql_app_db }}' replicated to slave successfully"
+      when: slave_db_check.stdout | length > 0
+
+    - name: Warn if database not yet replicated
+      debug:
+        msg: "WARNING: Database '{{ mysql_app_db }}' not found on slave. Check replication status."
+      when: slave_db_check.stdout | length == 0

@@ -1,0 +1,8 @@
+---
+# Namespace for data layer components (Redis Sentinel)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster

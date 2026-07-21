@@ -309,7 +309,7 @@ terraform apply -target=alicloud_instance.k3s_node_02  # 再升 node-02
 
 ## 5. 验证清单
 
-Phase 1 完成后逐项验证（全部通过）：
+Phase 1 完成后逐项验证：
 
 - [x] `terraform output` 显示 3 个内网 IP + 1 个 EIP
 - [x] `ssh k3s-node-01` 直连成功（通过 EIP）

@@ -1,0 +1,49 @@
+---
+# ConfigMap for Redis Sentinel cluster
+# Contains: redis.conf, sentinel.conf, startup script
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+data:
+  # Redis server configuration
+  redis.conf: |
+    bind 0.0.0.0
+    protected-mode no
+    port 6379
+
+    # Persistence: RDB + AOF
+    appendonly yes
+    appendfsync everysec
+    save 900 1
+    save 300 10
+    save 60 10000
+    dir /data
+
+    # Logging
+    loglevel notice
+
+  # Sentinel configuration (initial - will be copied to writable volume)
+  sentinel.conf: |
+    port 26379
+    sentinel monitor mymaster redis-0.redis-headless.data-layer.svc.cluster.local 6379 2
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 30000
+    sentinel parallel-syncs mymaster 1
+
+  # Redis startup script
+  # Pod with ordinal 0 starts as master, others start as slaves of redis-0
+  start-redis.sh: |
+    #!/bin/sh
+    ORDINAL=${HOSTNAME##*-}
+    if [ "$ORDINAL" = "0" ]; then
+      echo "[Redis] Starting as MASTER (ordinal=$ORDINAL)"
+      redis-server /etc/redis/redis.conf
+    else
+      echo "[Redis] Starting as SLAVE of redis-0 (ordinal=$ORDINAL)"
+      redis-server /etc/redis/redis.conf --replicaof redis-0.redis-headless.data-layer.svc.cluster.local 6379
+    fi

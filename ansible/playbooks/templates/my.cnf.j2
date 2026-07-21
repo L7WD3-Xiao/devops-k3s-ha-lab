@@ -1,0 +1,42 @@
+# MySQL 8.0 configuration - managed by Ansible
+# Role: {{ mysql_role | default('standalone') }}
+# Server-ID: {{ mysql_server_id | default(1) }}
+# Generated: {{ ansible_date_time.iso8601 }}
+
+[mysqld]
+# ── Basic ──────────────────────────────────────────────────────
+server-id = {{ mysql_server_id | default(1) }}
+bind-address = 0.0.0.0
+port = 3306
+skip-name-resolve = ON
+
+# ── Character Set ──────────────────────────────────────────────
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+
+# ── GTID Replication ───────────────────────────────────────────
+gtid_mode = ON
+enforce-gtid-consistency = ON
+
+# ── Binary Log ─────────────────────────────────────────────────
+log-bin = mysql-bin
+binlog_format = ROW
+binlog_expire_logs_seconds = 604800
+
+# ── InnoDB ─────────────────────────────────────────────────────
+innodb_buffer_pool_size = {{ mysql_innodb_buffer_pool_size }}
+innodb_redo_log_capacity = 64M
+
+# ── Connections ────────────────────────────────────────────────
+max_connections = {{ mysql_max_connections }}
+
+# ── Slow Query Log ─────────────────────────────────────────────
+slow_query_log = ON
+long_query_time = 2
+slow_query_log_file = /var/log/mysql-slow.log
+
+# ── Error Log ──────────────────────────────────────────────────
+log_error = /var/log/mysqld.log
+
+[client]
+default-character-set = utf8mb4

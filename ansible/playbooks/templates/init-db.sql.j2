@@ -1,0 +1,30 @@
+-- Database initialization for shortlink service
+-- Run on Master only (replicates to Slave via GTID)
+
+-- Create application database
+CREATE DATABASE IF NOT EXISTS `{{ mysql_app_db }}`
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE `{{ mysql_app_db }}`;
+
+-- Create url_mapping table for shortlink service
+CREATE TABLE IF NOT EXISTS url_mapping (
+    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    short_code   VARCHAR(10) NOT NULL UNIQUE,
+    original_url TEXT NOT NULL,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_short_code (short_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Replication user (allows Slave to connect from VPC subnet)
+CREATE USER IF NOT EXISTS '{{ mysql_repl_user }}'@'{{ mysql_repl_allowed_host }}'
+  IDENTIFIED BY '{{ mysql_repl_password }}';
+GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_repl_user }}'@'{{ mysql_repl_allowed_host }}';
+
+-- Application user (for shortlink service)
+CREATE USER IF NOT EXISTS '{{ mysql_app_user }}'@'%'
+  IDENTIFIED BY '{{ mysql_app_password }}';
+GRANT ALL PRIVILEGES ON `{{ mysql_app_db }}`.* TO '{{ mysql_app_user }}'@'%';
+
+FLUSH PRIVILEGES;

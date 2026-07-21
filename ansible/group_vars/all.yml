@@ -61,3 +61,22 @@ k3s_data_dir: /var/lib/rancher/k3s
 
 # External EIP on node-01 (for kubectl access from outside VPC)
 k3s_external_ip: 116.62.168.245
+
+# ── MySQL Configuration ──────────────────────────────────────
+mysql_version: "8.0.46"
+mysql_root_password: "MyRoot@2026!"
+mysql_repl_user: "repl"
+mysql_repl_password: "Repl@2026!"
+mysql_repl_allowed_host: "192.168.1.%"
+
+mysql_app_db: "shortlink"
+mysql_app_user: "shortlink"
+mysql_app_password: "Shortlink@2026!"
+
+mysql_master_ip: "192.168.1.230"
+mysql_slave_ip: "192.168.1.229"
+
+mysql_innodb_buffer_pool_size: "256M"
+mysql_max_connections: 100
+
+mysql_rpm_dir: "/tmp/mysql-rpms"

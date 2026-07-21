@@ -1,0 +1,92 @@
+---
+# Redis StatefulSet: 3 replicas (1 master + 2 slaves)
+# Pod anti-affinity ensures one Redis pod per node
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      name: redis
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      name: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  serviceName: redis-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # Spread Redis pods across different nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: redis
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["/bin/sh", "/etc/redis/start-redis.sh"]
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 512Mi
