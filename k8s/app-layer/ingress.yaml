@@ -1,0 +1,28 @@
+---
+# Ingress — expose short link service via K3s built-in Traefik
+#
+# Access: http://<node-EIP>/ (Traefik listens on port 80 on all nodes)
+#
+# No host specified — catches all HTTP traffic on port 80.
+# In production, add a domain name + TLS certificate.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shortlink
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shortlink
+                port:
+                  number: 8080

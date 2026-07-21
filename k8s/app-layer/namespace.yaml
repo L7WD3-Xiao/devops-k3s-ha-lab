@@ -1,0 +1,8 @@
+---
+# Namespace for application layer (short link service)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster

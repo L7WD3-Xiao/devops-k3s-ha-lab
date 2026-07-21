@@ -1,0 +1,98 @@
+---
+# Short link service — Deployment + Service
+#
+# 2 replicas spread across nodes (anti-affinity preferred, not required —
+# 3-node cluster with 2 replicas allows rolling updates without downtime).
+#
+# Image: pulled from Alibaba Cloud ACR via VPC domain (free, fast).
+# K3s registries.yaml has global auth configured — no imagePullSecret needed.
+#
+# Health probes:
+#   liveness:  /health (HTTP 200 = alive)
+#   readiness: /health (HTTP 200 = ready to serve traffic)
+#
+# Resource limits are conservative for 2C2G/2C4G nodes.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shortlink
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  selector:
+    app: shortlink
+  ports:
+    - port: 8080
+      name: http
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shortlink
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shortlink
+  template:
+    metadata:
+      labels:
+        app: shortlink
+    spec:
+      # Prefer spreading pods across nodes (soft constraint)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: shortlink
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: shortlink
+          image: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: shortlink-config
+            - secretRef:
+                name: shortlink-secrets
+          # Liveness: kill and restart if unhealthy
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          # Readiness: only route traffic when ready
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # Graceful shutdown: allow 10s for in-flight requests
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+      terminationGracePeriodSeconds: 15

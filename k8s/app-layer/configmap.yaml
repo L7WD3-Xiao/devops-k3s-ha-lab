@@ -1,0 +1,30 @@
+---
+# ConfigMap for short link service
+# Contains non-sensitive configuration (sensitive values go in Secret)
+#
+# The app connects to:
+#   - MySQL via ProxySQL (read/write splitting, transparent to app)
+#   - Redis via Sentinel (automatic failover)
+#
+# Both services are in the data-layer namespace, accessed via cross-namespace DNS.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shortlink-config
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+data:
+  # MySQL via ProxySQL (writes -> Master, reads -> Slave)
+  MYSQL_HOST: "proxysql.data-layer.svc.cluster.local"
+  MYSQL_PORT: "6033"
+  MYSQL_USER: "shortlink"
+  MYSQL_DATABASE: "shortlink"
+
+  # Redis via Sentinel (auto-discovers and follows the master)
+  REDIS_SENTINEL: "sentinel.data-layer.svc.cluster.local:26379"
+  REDIS_MASTER_NAME: "mymaster"
+
+  # Application
+  APP_PORT: "8080"

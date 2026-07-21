@@ -1,0 +1,15 @@
+# Build context exclusions — keep image build fast and lean
+.git
+.workbuddy
+terraform
+ansible
+k8s
+docs
+legacy
+scripts
+kubeconfig.yaml
+kubeconfig.yaml.example
+overview.md
+*.md
+.gitattributes
+.gitignore

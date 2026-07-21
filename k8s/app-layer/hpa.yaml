@@ -1,0 +1,42 @@
+---
+# HPA — auto-scale short link pods based on CPU usage
+#
+# K3s includes metrics-server by default, so HPA works out of the box.
+# Min 2 replicas (HA), max 6 (resource ceiling on 2C nodes).
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shortlink
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shortlink
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# PDB — ensure at least 1 pod stays available during voluntary disruptions
+# (node drain, rolling update, etc.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shortlink-pdb
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: shortlink
