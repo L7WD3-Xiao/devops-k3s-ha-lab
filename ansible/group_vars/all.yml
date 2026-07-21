@@ -80,3 +80,21 @@ mysql_innodb_buffer_pool_size: "256M"
 mysql_max_connections: 100
 
 mysql_rpm_dir: "/tmp/mysql-rpms"
+
+# ── Alibaba Cloud ACR (Personal Edition) ──────────────────────
+# Region: cn-hangzhou (same as ECS, VPC pull is free)
+# VPC domain: registry-vpc.cn-hangzhou.aliyuncs.com (intranet, free)
+# Public domain: registry.cn-hangzhou.aliyuncs.com (internet, charged)
+#
+# Setup (manual in Alibaba Cloud console):
+#   1. Container Registry → Personal Edition → activate
+#   2. Access Credentials → set fixed password
+#   3. Create namespace: shortlink
+#   4. Create repository: shortlink-app (private)
+#
+# Then fill in acr_username and acr_password below.
+acr_registry: "registry-vpc.cn-hangzhou.aliyuncs.com"
+acr_namespace: "shortlink"
+acr_repository: "shortlink-app"
+acr_username: ""  # 阿里云账号 (如 xxx@aliyun.com) 或 RAM 子账号
+acr_password: ""  # ACR 控制台设置的固定密码 (非阿里云账号密码)

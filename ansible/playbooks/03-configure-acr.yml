@@ -1,0 +1,184 @@
+---
+# 03-configure-acr.yml
+# Configure Alibaba Cloud ACR (Personal Edition) access for K3s cluster
+#
+# What this playbook does:
+#   1. Deploy registries.yaml with ACR VPC auth to all 3 nodes
+#   2. Rolling restart K3s (one node at a time, serial=1)
+#   3. Verify ACR connectivity from each node
+#
+# Prerequisites:
+#   - Fill in acr_username and acr_password in group_vars/all.yml
+#   - ACR Personal Edition activated in Alibaba Cloud console
+#   - Namespace and repository created in ACR
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml
+#
+# Verification:
+#   ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml --tags verify
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Validate ACR credentials are set
+# ──────────────────────────────────────────────────────────────
+- name: Validate ACR configuration
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Check acr_username is set
+      assert:
+        that:
+          - acr_username is defined
+          - acr_username | length > 0
+        fail_msg: >
+          acr_username is empty. Set it in group_vars/all.yml
+          (your Alibaba Cloud account or RAM sub-account).
+        success_msg: "ACR username: {{ acr_username }}"
+
+    - name: Check acr_password is set
+      assert:
+        that:
+          - acr_password is defined
+          - acr_password | length > 0
+        fail_msg: >
+          acr_password is empty. Set it in group_vars/all.yml
+          (the fixed password configured in ACR console).
+        success_msg: "ACR password is set (hidden)"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: Deploy registries.yaml + rolling restart
+# serial=1: restart one node at a time to keep cluster HA
+# ──────────────────────────────────────────────────────────────
+- name: Deploy ACR registries config and restart K3s
+  hosts: k3s_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Create K3s config directory
+      file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Backup existing registries.yaml
+      copy:
+        src: "{{ k3s_config_dir }}/registries.yaml"
+        dest: "{{ k3s_config_dir }}/registries.yaml.bak"
+        remote_src: true
+        force: false
+      when: lookup('file', k3s_config_dir + '/registries.yaml', errors='ignore') is defined
+
+    - name: Deploy registries.yaml with ACR auth
+      template:
+        src: registries.yaml.j2
+        dest: "{{ k3s_config_dir }}/registries.yaml"
+        mode: '0600'
+      register: registries_result
+
+    - name: Show registries.yaml content (mask password)
+      debug:
+        msg: "{{ lookup('template', 'registries.yaml.j2') | regex_replace('password: .*', 'password: ******') }}"
+
+    - name: Restart K3s to apply registries.yaml
+      systemd:
+        name: k3s
+        state: restarted
+      when: registries_result.changed
+
+    - name: Wait for K3s API to recover
+      wait_for:
+        port: "{{ k3s_api_port }}"
+        host: "{{ node_ips[inventory_hostname] }}"
+        timeout: 60
+      when: registries_result.changed
+
+    - name: Wait for node to rejoin cluster
+      command: /usr/local/bin/k3s kubectl get node {{ inventory_hostname }}
+      register: node_ready
+      until: "' Ready' in node_ready.stdout"
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: registries_result.changed
+      delegate_to: node-01
+
+    - name: Node rejoined successfully
+      debug:
+        msg: "{{ inventory_hostname }}: K3s restarted, node Ready"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Verify ACR connectivity
+# ──────────────────────────────────────────────────────────────
+- name: Verify ACR access from cluster nodes
+  hosts: k3s_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Test ACR VPC endpoint connectivity
+      command: "curl -s -o /dev/null -w '%{http_code}' https://{{ acr_registry }}/v2/"
+      register: acr_http_code
+      changed_when: false
+      failed_when: acr_http_code.stdout not in ['200', '401']
+
+    - name: Show ACR endpoint response
+      debug:
+        msg: "{{ inventory_hostname }}: ACR VPC endpoint returned HTTP {{ acr_http_code.stdout }} (401 = auth required, 200 = OK)"
+
+    - name: Test containerd ACR login
+      shell: >-
+        /usr/local/bin/k3s ctr image pull
+        --user {{ acr_username }}:{{ acr_password }}
+        {{ acr_registry }}/{{ acr_namespace }}/{{ acr_repository }}:latest
+        2>&1 | tail -1 || true
+      register: ctr_pull_result
+      changed_when: false
+      when: false  # Skip — repo may not have images yet
+
+    - name: Verify registries.yaml contains ACR auth
+      shell: "grep -c '{{ acr_registry }}' {{ k3s_config_dir }}/registries.yaml"
+      register: acr_config_check
+      changed_when: false
+      failed_when: acr_config_check.stdout != '1'
+
+    - name: ACR configuration verified
+      debug:
+        msg: "{{ inventory_hostname }}: ACR registries.yaml configured correctly"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 4: Summary
+# ──────────────────────────────────────────────────────────────
+- name: Display ACR setup summary
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Show completion message
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " Alibaba Cloud ACR configured for K3s cluster"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " Registry (VPC): {{ acr_registry }}"
+          - " Namespace:      {{ acr_namespace }}"
+          - " Repository:     {{ acr_repository }}"
+          - ""
+          - " Image format:"
+          - "   {{ acr_registry }}/{{ acr_namespace }}/{{ acr_repository }}:v1"
+          - ""
+          - " Push from local:"
+          - "   docker login {{ acr_registry }} -u {{ acr_username }}"
+          - "   docker tag shortlink-app:v1 {{ acr_registry }}/{{ acr_namespace }}/{{ acr_repository }}:v1"
+          - "   docker push {{ acr_registry }}/{{ acr_namespace }}/{{ acr_repository }}:v1"
+          - ""
+          - " K3s pulls via VPC (free, no imagePullSecret needed)"
+          - "═══════════════════════════════════════════════════════"

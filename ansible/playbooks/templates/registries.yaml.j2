@@ -1,0 +1,37 @@
+# /etc/rancher/k3s/registries.yaml
+# Managed by Ansible — do not edit manually
+# Node: {{ inventory_hostname }}
+#
+# Contains:
+#   1. Docker Hub mirror (daocloud + fallback with proxy)
+#   2. Alibaba Cloud ACR VPC endpoint auth (free intranet pull)
+#
+# After changing this file, restart K3s:
+#   sudo systemctl restart k3s
+
+mirrors:
+  # ── Docker Hub (via daocloud mirror, fallback to official via proxy) ──
+  docker.io:
+    endpoint:
+      - "https://docker.m.daocloud.io"
+      - "https://registry-1.docker.io"
+
+  gcr.io:
+    endpoint:
+      - "https://gcr.m.daocloud.io"
+
+  quay.io:
+    endpoint:
+      - "https://quay.m.daocloud.io"
+
+{% if acr_username is defined and acr_username | length > 0 %}
+# ── Alibaba Cloud ACR (VPC intranet — free, fast) ──────────────────
+# VPC domain: registry-vpc.cn-hangzhou.aliyuncs.com
+# Public domain: registry.cn-hangzhou.aliyuncs.com (incurs traffic fee)
+# Always use VPC domain for ECS in the same region.
+configs:
+  "{{ acr_registry }}":
+    auth:
+      username: {{ acr_username }}
+      password: {{ acr_password }}
+{% endif %}
