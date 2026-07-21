@@ -1,74 +1,33 @@
-# Phase 2: K3s 3-Server HA 集群部署完成
+# Phase 4 准备：阿里云 ACR 镜像仓库配置
 
-## 集群状态
+## 完成内容
 
-| 节点 | 内网 IP | 角色 | 状态 | K3s 版本 |
-|------|---------|------|------|----------|
-| node-01 | 192.168.1.228 | control-plane,etcd | Ready | v1.36.2+k3s1 |
-| node-02 | 192.168.1.230 | control-plane,etcd | Ready | v1.36.2+k3s1 |
-| node-03 | 192.168.1.229 | control-plane,etcd | Ready | v1.36.2+k3s1 |
+为 Phase 4（短链服务部署）前置的镜像仓库配置——阿里云 ACR 个人版集成 K3s 集群。
 
-**API Server**: `https://116.62.168.245:6443`
-**数据存储**: embedded etcd (3 成员 HA)
-**容器运行时**: containerd 2.3.2-k3s2
+### 新增文件
+- `ansible/playbooks/templates/registries.yaml.j2` — K3s containerd 镜像仓库配置模板（Docker Hub 加速 + ACR VPC 认证）
+- `ansible/playbooks/03-configure-acr.yml` — Ansible playbook：验证凭证 → 分发配置 → 滚动重启 K3s → 验证连通性
+- `scripts/build-push.sh` — 本地 Docker 构建推送脚本
+- `docs/phase-4-acr-setup.md` — 完整配置指南（方案选型、网络设计、认证方式、操作步骤、常见坑）
 
-## 核心 Pod 状态
+### 修改文件
+- `ansible/group_vars/all.yml` — 新增 ACR 变量（`acr_registry`、`acr_namespace`、`acr_username`、`acr_password`）
 
-| Namespace | Pod | Status |
-|-----------|-----|--------|
-| kube-system | coredns-5f5694d56b-v4bls | Running |
-| kube-system | metrics-server-7c86f97b8d-97l2g | Running |
-| kube-system | local-path-provisioner-58d557dc48-grv7r | Running |
-| kube-system | traefik-6cd8c7cd89-drqnp | Running |
-| kube-system | svclb-traefik (×3) | Running |
+## 方案设计
 
-etcd 健康检查全部通过 (ping/log/etcd/etcd-readiness/informer-sync = ok)
+- **ACR 个人版**（免费）：3 namespace、50 repo，够用
+- **VPC 内网拉取**：`registry-vpc.cn-hangzhou.aliyuncs.com`，零流量费
+- **registries.yaml 认证**：containerd 级别全局配置，Deployment 无需 imagePullSecrets
+- **滚动重启**：`serial=1` 逐节点重启 K3s，保持集群 HA
 
-## 部署过程中解决的问题
+## 待用户操作
 
-### 1. cgroup v1 → v2 切换
-K3s v1.36.2 要求 cgroup v2，Alibaba Cloud Linux 3 默认使用 cgroup v1。
-```bash
-sudo grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=1"
-sudo grubby --update-kernel=ALL --remove-args="cgroup.memory=nokmem"
-sudo reboot
-```
-
-### 2. Docker Hub 不可访问
-配置 `/etc/rancher/k3s/registries.yaml` 使用国内镜像源：
-```yaml
-mirrors:
-  docker.io:
-    endpoint:
-      - "https://docker.m.daocloud.io"
-```
-
-### 3. node-02/03 无公网 — 镜像分发
-- node-01 导出镜像: `k3s ctr images export --platform linux/amd64`
-- 分发到 `/var/lib/rancher/k3s/agent/images/` (K3s 自动导入)
-- 同时分发 registries.yaml
-
-### 4. GitHub 下载慢
-使用 `gh-proxy.com` 代理下载 K3s 二进制 (78MB)。
-
-### 5. Ansible 适配
-- ansible-core 通过 `python3.11 -m pip` 安装 (dnf 包不完整)
-- `become:true` 环境用 `/usr/local/bin/k3s kubectl` 完整路径
-- `dnf` 模块改为 `command` (python3.11 缺 dnf 绑定)
-
-## 访问方式
-
-```bash
-# 使用本机 kubeconfig
-export KUBECONFIG=D:/Study/Note/project/k8s/kubeconfig.yaml
-kubectl get nodes
-
-# 或 SSH 到 node-01
-ssh ops@116.62.168.245
-sudo k3s kubectl get nodes
-```
+1. 阿里云控制台开通 ACR 个人版 + 设置固定密码 + 创建 namespace(`shortlink`) + 仓库(`shortlink-app`)
+2. 在 `ansible/group_vars/all.yml` 填入 `acr_username` 和 `acr_password`
+3. 执行 `ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml`
+4. 推送测试镜像验证拉取链路
 
 ## 下一步
-- Phase 3: 部署短链服务应用
-- 配置 Ingress (Traefik 已就绪)
-- 部署 MySQL + Redis (StatefulSet)
+
+- Phase 4：编写短链服务 Dockerfile + K8s Deployment/Service/Ingress
+- Phase 5：CI/CD（FluxCD GitOps）
