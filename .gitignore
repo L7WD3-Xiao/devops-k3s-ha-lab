@@ -1,1 +1,4 @@
 .workbuddy/
+
+# 敏感凭证文件（集群 admin 证书 + EC 私钥）
+kubeconfig.yaml

@@ -1,6 +1,8 @@
 ---
 # 00-init-system.yml
-# Base system initialization for all K3s cluster nodes
+# Base system initialization for all K3s cluster nodes (Alibaba Cloud ECS)
+# Most setup done by cloud-init; this playbook verifies + supplements.
+#
 # Run: ansible-playbook -i inventory.ini playbooks/00-init-system.yml
 
 - name: Initialize all K3s cluster nodes
@@ -9,20 +11,9 @@
   gather_facts: true
 
   tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: true
-        cache_valid_time: 3600
-
-    - name: Upgrade all packages
-      apt:
-        upgrade: dist
-        autoremove: true
-
-    - name: Install base packages
-      apt:
-        name: "{{ base_packages }}"
-        state: present
+    - name: Install base packages (dnf)
+      command: "dnf install -y {{ base_packages | join(' ') }}"
+      changed_when: false  # idempotent: dnf skips already-installed packages
 
     - name: Disable swap immediately
       shell: swapoff -a
@@ -35,6 +26,12 @@
         regexp: '\sswap\s'
         state: absent
 
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+      ignore_errors: true
+
     - name: Configure sysctl for K3s
       sysctl:
         name: "{{ item.key }}"
@@ -43,13 +40,7 @@
         state: present
         reload: true
       loop: "{{ sysctl_k3s_config }}"
-      ignore_errors: true  # br_netfilter may not be available in WSL2 kernel
-
-    - name: Ensure br_netfilter module is loaded
-      modprobe:
-        name: br_netfilter
-        state: present
-      ignore_errors: true
+      ignore_errors: true  # br_netfilter may not be loaded yet
 
     - name: Configure /etc/hosts
       copy:
@@ -64,89 +55,33 @@
       timezone:
         name: "{{ timezone }}"
 
-    - name: Ensure chrony is running and enabled
+    - name: Ensure chronyd is running and enabled
       service:
-        name: chrony
+        name: chronyd
         state: started
         enabled: true
 
-    - name: Create ops user
+    - name: Ensure firewalld is disabled (K3s manages its own firewall)
+      service:
+        name: firewalld
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Verify ops user exists
       user:
         name: "{{ ops_user }}"
         shell: /bin/bash
-        groups: sudo
+        groups: wheel
         append: true
         create_home: true
 
-    - name: Set ops password
-      user:
-        name: "{{ ops_user }}"
-        password: "{{ ops_password }}"
-
-    - name: Allow ops passwordless sudo
+    - name: Ensure ops passwordless sudo
       copy:
         dest: "/etc/sudoers.d/{{ ops_user }}"
         content: "{{ ops_user }} ALL=(ALL) NOPASSWD:ALL\n"
         mode: '0440'
         validate: 'visudo -cf %s'
-
-    - name: Create .ssh directory for ops user
-      file:
-        path: "/home/{{ ops_user }}/.ssh"
-        state: directory
-        owner: "{{ ops_user }}"
-        group: "{{ ops_user }}"
-        mode: '0700'
-
-    - name: Configure sshd to listen on node IP
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?ListenAddress'
-        line: "ListenAddress {{ node_ips[inventory_hostname] }}"
-        state: present
-      notify: restart sshd
-
-    - name: Ensure sshd is running and enabled
-      service:
-        name: ssh
-        state: started
-        enabled: true
-
-    - name: Create WSL2 IP alias systemd service
-      copy:
-        dest: /etc/systemd/system/wsl-ip-alias.service
-        content: |
-          [Unit]
-          Description=WSL2 IP Alias for K3s node
-          After=network.target
-
-          [Service]
-          Type=oneshot
-          ExecStart=/sbin/ip addr add {{ node_ips[inventory_hostname] }}/24 dev eth0
-          ExecStop=/sbin/ip addr del {{ node_ips[inventory_hostname] }}/24 dev eth0
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-      notify: enable wsl-ip-alias
-
-    - name: Start WSL2 IP alias service
-      systemd:
-        name: wsl-ip-alias
-        state: started
-        daemon_reload: true
-
-  handlers:
-    - name: restart sshd
-      service:
-        name: ssh
-        state: restarted
-
-    - name: enable wsl-ip-alias
-      systemd:
-        name: wsl-ip-alias
-        enabled: true
-        daemon_reload: true
 
   post_tasks:
     - name: Verify swap is disabled
@@ -158,17 +93,17 @@
       debug:
         var: free_output.stdout_lines
 
-    - name: Verify IP alias
-      command: ip addr show eth0
-      register: ip_output
-      changed_when: false
-
-    - name: Show eth0 info
-      debug:
-        var: ip_output.stdout_lines
-
-    - name: Verify node connectivity
-      command: "ping -c 1 {{ item.ip }}"
+    - name: Verify inter-node connectivity
+      command: "ping -c 1 -W 2 {{ item.ip }}"
       loop: "{{ cluster_hosts }}"
       when: item.hostname != inventory_hostname
       changed_when: false
+
+    - name: Show node network info
+      command: ip -4 addr show eth0
+      register: ip_output
+      changed_when: false
+
+    - name: Display eth0 info
+      debug:
+        var: ip_output.stdout_lines

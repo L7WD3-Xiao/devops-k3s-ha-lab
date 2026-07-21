@@ -1,41 +1,30 @@
 # /etc/rancher/k3s/config.yaml
 # Managed by Ansible — do not edit manually
 # Node: {{ inventory_hostname }} ({{ node_ips[inventory_hostname] }})
-# Role: {% if inventory_hostname == k3s_first_server %}server{% else %}agent{% endif %}
+# Role: server (3-Server HA with embedded etcd)
 
 # ── Node Identity ──────────────────────────────────────────────
 node-ip: {{ node_ips[inventory_hostname] }}
 node-name: {{ inventory_hostname }}
 
 # ── Network ────────────────────────────────────────────────────
-# WSL2: all nodes share eth0, must explicitly set flannel interface
 flannel-iface: {{ k3s_flannel_iface }}
 
-{% if inventory_hostname == k3s_first_server %}
-# ── Server Settings ────────────────────────────────────────────
 # Allow non-root (ops) user to read kubeconfig for kubectl access
 write-kubeconfig-mode: "0644"
 
-# TLS SAN: add node IP to cert SAN so host machine can access K8s API
+# TLS SAN: add node IP for cert validation
 tls-san:
   - {{ node_ips[inventory_hostname] }}
+{% if inventory_hostname == k3s_first_server %}
+  - {{ k3s_external_ip }}
 
-# ── WSL2 Note ──────────────────────────────────────────────────
-# K3s HA (multi-server) is NOT possible on WSL2 because:
-#   1. K3s supervisor always binds 127.0.0.1:6444 (hardcoded)
-#   2. K3s embedded etcd always connects to 127.0.0.1:2379 (hardcoded)
-#   3. WSL2 shares 127.0.0.1 across ALL distros
-# Only one K3s server can run at a time.
-# Architecture: 1 server (node-01) + 2 agents (node-02, node-03)
+# ── First Server (cluster-init) ────────────────────────────────
+# Initialize new K3s cluster with embedded etcd datastore
+cluster-init: true
 {% else %}
-# ── Agent Settings ─────────────────────────────────────────────
-# Connect to the K3s server
-server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
 
-# WSL2: disable agent's client-side load balancer.
-# The agent LB listens on 127.0.0.1:6444 by default, but the server's
-# supervisor also binds 127.0.0.1:6444 — and WSL2 shares loopback across
-# all distros. With only 1 server, the LB is unnecessary; agent connects
-# directly to the server URL above.
-disable-apiserver-lb: true
+# ── Joining Server (HA member) ─────────────────────────────────
+# Connect to the first server to join the HA etcd cluster
+server: https://{{ k3s_first_server_ip }}:{{ k3s_api_port }}
 {% endif %}

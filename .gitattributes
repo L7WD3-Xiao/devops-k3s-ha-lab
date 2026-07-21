@@ -1,0 +1,18 @@
+# 默认：文本文件自动检测，checkout 时使用 CRLF（Windows 开发环境）
+* text=auto eol=crlf
+
+# Linux 执行类文件：强制 LF，避免上传到 Linux 后出现 bad interpreter: /bin/bash^M
+*.sh text eol=lf
+*.j2 text eol=lf
+
+# 二进制文件：不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.tgz binary
