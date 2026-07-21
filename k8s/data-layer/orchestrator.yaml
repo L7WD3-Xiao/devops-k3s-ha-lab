@@ -1,0 +1,133 @@
+---
+# Orchestrator — MySQL topology management & automatic failover
+# Web UI: http://orchestrator:3000
+# Discovers MySQL master-slave topology and performs auto-recovery on failure
+#
+# Backend: uses existing MySQL master (192.168.1.230) for metadata storage.
+# Trade-off: if master fails, Orchestrator loses backend access temporarily,
+# but can still promote the slave. Backend data is GTID-replicated to slave.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: data-layer
+data:
+  orchestrator.conf.json: |
+    {
+      "Debug": false,
+      "Listen": ":3000",
+
+      "MySQLTopologyUser": "orchestrator",
+      "MySQLTopologyPassword": "Orchestrator@2026!",
+      "MySQLTopologyHost": "192.168.1.230",
+      "MySQLTopologyPort": 3306,
+
+      "MySQLOrchestratorHost": "192.168.1.230",
+      "MySQLOrchestratorPort": 3306,
+      "MySQLOrchestratorDatabase": "orchestrator",
+      "MySQLOrchestratorUser": "orchestrator",
+      "MySQLOrchestratorPassword": "Orchestrator@2026!",
+
+      "DiscoverByShowSlaveHosts": false,
+      "InstancePollSeconds": 5,
+      "FailureDetectionPeriodBlockMinutes": 1,
+      "RecoveryPeriodBlockSeconds": 30,
+
+      "MasterFailoverDetachReplicaMasterHost": true,
+      "MasterFailoverLostInstancesDowntimeMinutes": 0,
+      "DetachLostReplicasAfterMasterFailover": true,
+      "ApplyMySQLPromotionAfterMasterFailover": true,
+
+      "PreventCrossDataCenterMasterFailover": false,
+      "PreventCrossRegionMasterFailover": false,
+
+      "DetectClusterAliasQuery": "SELECT SUBSTRING_INDEX(@@hostname, '.', 1)",
+      "DetectInstanceAliasQuery": "SELECT SUBSTRING_INDEX(@@hostname, '.', 1)",
+
+      "HostnameResolveMethod": "none",
+      "SkipImplicitResolve": true,
+
+      "PowerAuthUsers": ["root", "orchestrator"],
+      "AccessLevel": "write",
+
+      "Autorecovery": true,
+      "FailMasterPromotionIfSQLThreadNotRunning": true,
+      "DelayMasterPromotionIfSQLThreadNotUpToDate": true,
+
+      "ProxySQL": {
+        "Enabled": true,
+        "ProxySQLHost": "proxysql",
+        "ProxySQLPort": 6032,
+        "ProxySQLUser": "admin",
+        "ProxySQLPassword": "admin",
+        "WriterHostgroupID": 1,
+        "ReaderHostgroupID": 2
+      },
+
+      "MySQLTransport": "tcp",
+      "AuditPurgeDurationHours": 168,
+      "MaintenancePurgeDurationHours": 168
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  selector:
+    app: orchestrator
+  ports:
+    - port: 3000
+      name: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: node-01
+      containers:
+        - name: orchestrator
+          image: openarkcode/orchestrator:latest
+          command: ["/usr/local/orchestrator/orchestrator"]
+          args: ["-c", "/etc/orchestrator.conf.json", "http"]
+          ports:
+            - containerPort: 3000
+              name: web
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/orchestrator.conf.json
+              subPath: orchestrator.conf.json
+      volumes:
+        - name: config
+          configMap:
+            name: orchestrator-config

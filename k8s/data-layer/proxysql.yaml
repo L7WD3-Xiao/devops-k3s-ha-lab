@@ -1,0 +1,140 @@
+---
+# ProxySQL — MySQL read/write splitting proxy
+# App connects to proxysql:6033 (MySQL protocol)
+# Admin interface: proxysql:6032 (admin:admin)
+#
+# mysql_replication_hostgroups enables auto-routing:
+#   read_only=OFF → hostgroup 1 (writer)
+#   read_only=ON  → hostgroup 2 (reader)
+# When Orchestrator promotes a new master, ProxySQL adjusts automatically.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxysql-config
+  namespace: data-layer
+data:
+  proxysql.cnf: |
+    # ProxySQL config — parsed by libconfig (string values MUST be quoted)
+    datadir="/var/lib/proxysql"
+    errorlog="/var/lib/proxysql/proxysql.log"
+
+    admin_variables=
+    {
+      admin_credentials="admin:admin;radmin:radmin"
+      mysql_ifaces="0.0.0.0:6032"
+      stats_credentials="stats:stats"
+      refresh_interval=2000
+    }
+
+    mysql_variables=
+    {
+      threads=4
+      max_connections=200
+      interfaces="0.0.0.0:6033"
+      default_schema="shortlink"
+      server_version="8.0"
+      connect_timeout_server=3000
+      monitor_history=600000
+      monitor_connect_interval=60000
+      monitor_ping_interval=10000
+      monitor_read_only_interval=2000
+      monitor_read_only_timeout=500
+      ping_interval_server_msec=120000
+      ping_timeout_server=200
+      commands_stats=true
+      sessions_sort=true
+      monitor_username="monitor"
+      monitor_password="Monitor@2026!"
+    }
+
+    mysql_servers=
+    (
+      { address="192.168.1.230" , port=3306 , hostgroup=1 , max_connections=50 , comment="MySQL Master node-02" },
+      { address="192.168.1.229" , port=3306 , hostgroup=2 , max_connections=50 , comment="MySQL Slave  node-03" }
+    )
+
+    mysql_users=
+    (
+      { username="shortlink" , password="Shortlink@2026!" , default_hostgroup=1 , active=1 }
+    )
+
+    mysql_query_rules=
+    (
+      { rule_id=1 , active=1 , match_pattern="^SELECT.*FOR UPDATE" , destination_hostgroup=1 , apply=1 , comment="SELECT FOR UPDATE -> writer" },
+      { rule_id=2 , active=1 , match_pattern="^SELECT" , destination_hostgroup=2 , apply=1 , comment="SELECT -> reader" },
+      { rule_id=3 , active=1 , match_pattern="^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|REPLACE)" , destination_hostgroup=1 , apply=1 , comment="DML/DDL -> writer" }
+    )
+
+    mysql_replication_hostgroups=
+    (
+      { writer_hostgroup=1 , reader_hostgroup=2 , comment="MySQL master-slave replication" }
+    )
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  selector:
+    app: proxysql
+  ports:
+    - port: 6033
+      name: mysql-proxy
+    - port: 6032
+      name: admin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxysql
+  template:
+    metadata:
+      labels:
+        app: proxysql
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: node-01
+      containers:
+        - name: proxysql
+          image: proxysql/proxysql:2.7.2
+          ports:
+            - containerPort: 6033
+              name: mysql-proxy
+            - containerPort: 6032
+              name: admin
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 6033
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/proxysql.cnf
+              subPath: proxysql.cnf
+            - name: data
+              mountPath: /var/lib/proxysql
+      volumes:
+        - name: config
+          configMap:
+            name: proxysql-config
+        - name: data
+          emptyDir: {}

@@ -17,6 +17,11 @@ collation-server = utf8mb4_unicode_ci
 # ── GTID Replication ───────────────────────────────────────────
 gtid_mode = ON
 enforce-gtid-consistency = ON
+{% if mysql_role == 'slave' %}
+# ── Read-Only (Slave) ──────────────────────────────────────────
+read_only = ON
+super_read_only = ON
+{% endif %}
 
 # ── Binary Log ─────────────────────────────────────────────────
 log-bin = mysql-bin
