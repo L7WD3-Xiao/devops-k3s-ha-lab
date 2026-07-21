@@ -1,35 +1,35 @@
-# Phase 4 准备：阿里云 ACR 镜像仓库配置
+# Phase 4 准备：ACR 配置 + 安全加固
 
 ## 完成内容
 
-为 Phase 4（短链服务部署）前置的镜像仓库配置——阿里云 ACR 个人版集成 K3s 集群。
+### 1. MySQL 密码明文 → K8s Secret 迁移
+将 `proxysql.yaml` 和 `orchestrator.yaml` 中硬编码的 MySQL 密码改为 K8s Secret + init container 方案：
+- ConfigMap 只放 `__PLACEHOLDER__` 占位符
+- init container 从 Secret 读取密码，用 `sed` 渲染最终配置到 emptyDir
+- 主容器挂载渲染后的文件
+- 验证：ProxySQL 读写分离 + Orchestrator 拓扑发现均正常
 
-### 新增文件
-- `ansible/playbooks/templates/registries.yaml.j2` — K3s containerd 镜像仓库配置模板（Docker Hub 加速 + ACR VPC 认证）
-- `ansible/playbooks/03-configure-acr.yml` — Ansible playbook：验证凭证 → 分发配置 → 滚动重启 K3s → 验证连通性
-- `scripts/build-push.sh` — 本地 Docker 构建推送脚本
-- `docs/phase-4-acr-setup.md` — 完整配置指南（方案选型、网络设计、认证方式、操作步骤、常见坑）
-- `ansible/group_vars/all.yml.example` — 脱敏配置模板（入库）
+### 2. ACR Playbook 执行
+`03-configure-acr.yml` 从 node-01 执行成功：
+- 3 节点滚动重启 K3s（serial=1），全部零失败
+- ACR VPC 域名连通性：3 节点均返回 HTTP 401（可达）
+- registries.yaml 配置验证：3 节点均包含 ACR auth
 
-### 修改文件
-- `ansible/group_vars/all.yml` — 新增 ACR 变量（含真实凭证，已 gitignore 不入库）
-- `.gitignore` — 添加 `group_vars/all.yml`
+## 新增/修改文件
 
-## 方案设计
+| 文件 | 说明 |
+|------|------|
+| `k8s/data-layer/secret.yaml.example` | K8s Secret 脱敏模板（入库） |
+| `k8s/data-layer/proxysql.yaml` | ConfigMap 占位符 + init container 渲染 |
+| `k8s/data-layer/orchestrator.yaml` | 同上 + imagePullPolicy: IfNotPresent |
+| `.gitignore` | 添加 `k8s/data-layer/secret.yaml` |
 
-- **ACR 个人版（新）**（免费）：`crpi-` 独占域名格式，2024-09-09 后创建
-- **VPC 内网拉取**：`crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com`，零流量费
-- **公网推送**：`crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com`（本地开发机）
-- **registries.yaml 认证**：containerd 级别全局配置，Deployment 无需 imagePullSecrets
-- **滚动重启**：`serial=1` 逐节点重启 K3s，保持集群 HA
-- **凭证脱敏**：`all.yml` 加入 `.gitignore`，`all.yml.example` 入库
+## ACR 配置摘要
 
-## 待用户操作
-
-1. ~~阿里云控制台开通 ACR 个人版~~ ✅ 已完成
-2. ~~填入 `acr_username` 和 `acr_password`~~ ✅ 已完成
-3. 执行 `ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml`
-4. 推送测试镜像验证拉取链路
+- **VPC 拉取**：`crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com`
+- **公网推送**：`crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com`
+- **镜像地址**：`crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1`
+- **K3s 全局免 imagePullSecret**：registries.yaml `configs` 段已配置 auth
 
 ## 下一步
 
