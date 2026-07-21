@@ -35,9 +35,15 @@ variable "zone_id" {
 # ═══════════════════════════════════════════════
 
 variable "instance_type" {
-  description = "ECS 实例规格"
+  description = "ECS 实例规格（node-01，轻量节点，2C2G 够用）"
   type        = string
   default     = "ecs.e-c1m1.large"
+}
+
+variable "instance_type_upgraded" {
+  description = "ECS 实例规格（node-02/03，跑 MySQL 物理机，需 2C4G）"
+  type        = string
+  default     = "ecs.e-c1m2.large"
 }
 
 variable "image_id" {

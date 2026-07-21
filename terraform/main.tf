@@ -184,7 +184,7 @@ resource "alicloud_instance" "k3s_node_02" {
 
   instance_name              = "k3s-node-02"
   host_name                  = "k3s-node-02"
-  instance_type              = var.instance_type
+  instance_type              = var.instance_type_upgraded
   image_id                   = local.image_id
   security_groups            = [alicloud_security_group.k3s.id]
   vswitch_id                 = alicloud_vswitch.k3s.id
@@ -215,7 +215,7 @@ resource "alicloud_instance" "k3s_node_03" {
 
   instance_name              = "k3s-node-03"
   host_name                  = "k3s-node-03"
-  instance_type              = var.instance_type
+  instance_type              = var.instance_type_upgraded
   image_id                   = local.image_id
   security_groups            = [alicloud_security_group.k3s.id]
   vswitch_id                 = alicloud_vswitch.k3s.id
