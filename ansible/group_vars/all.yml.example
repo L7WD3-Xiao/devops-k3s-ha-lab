@@ -1,5 +1,11 @@
 ---
 # Global variables for K3s 3-Server HA cluster (Alibaba Cloud ECS)
+#
+# This is a SANITIZED template — copy to all.yml and fill in real values.
+#   cp group_vars/all.yml.example group_vars/all.yml
+#   vim group_vars/all.yml
+#
+# all.yml is gitignored and NOT tracked in version control.
 
 # Node IP mapping (VPC 192.168.1.0/24)
 node_ips:
@@ -64,14 +70,14 @@ k3s_external_ip: 116.62.168.245
 
 # ── MySQL Configuration ──────────────────────────────────────
 mysql_version: "8.0.46"
-mysql_root_password: "MyRoot@2026!"
+mysql_root_password: "CHANGE_ME"           # ← MySQL root 密码
 mysql_repl_user: "repl"
-mysql_repl_password: "Repl@2026!"
+mysql_repl_password: "CHANGE_ME"           # ← MySQL 复制用户密码
 mysql_repl_allowed_host: "192.168.1.%"
 
 mysql_app_db: "shortlink"
 mysql_app_user: "shortlink"
-mysql_app_password: "Shortlink@2026!"
+mysql_app_password: "CHANGE_ME"            # ← 短链应用数据库密码
 
 mysql_master_ip: "192.168.1.230"
 mysql_slave_ip: "192.168.1.229"
@@ -81,20 +87,18 @@ mysql_max_connections: 100
 
 mysql_rpm_dir: "/tmp/mysql-rpms"
 
-# ── Alibaba Cloud ACR (Personal Edition) ──────────────────────
+# ── Alibaba Cloud ACR (Personal Edition — New, post 2024-09-09) ──
 # Region: cn-hangzhou (same as ECS, VPC pull is free)
-# VPC domain: registry-vpc.cn-hangzhou.aliyuncs.com (intranet, free)
-# Public domain: registry.cn-hangzhou.aliyuncs.com (internet, charged)
 #
-# Setup (manual in Alibaba Cloud console):
-#   1. Container Registry → Personal Edition → activate
-#   2. Access Credentials → set fixed password
-#   3. Create namespace: shortlink
-#   4. Create repository: shortlink-app (private)
+# New Personal Edition uses crpi- exclusive domains (not registry-):
+#   VPC domain:   crpi-{id}-vpc.{region}.personal.cr.aliyuncs.com (K3s pull, free)
+#   Public domain: crpi-{id}.{region}.personal.cr.aliyuncs.com    (local push)
 #
-# Then fill in acr_username and acr_password below.
-acr_registry: "registry-vpc.cn-hangzhou.aliyuncs.com"
-acr_namespace: "shortlink"
+# IMPORTANT: New Personal Edition does NOT support pulling via public domain.
+# K3s MUST use the VPC domain. Local docker push uses the public domain.
+acr_registry: "crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com"
+acr_registry_public: "crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com"
+acr_namespace: "shortlink123"
 acr_repository: "shortlink-app"
-acr_username: ""  # 阿里云账号 (如 xxx@aliyun.com) 或 RAM 子账号
-acr_password: ""  # ACR 控制台设置的固定密码 (非阿里云账号密码)
+acr_username: "CHANGE_ME"                 # ← 阿里云账号或 RAM 子账号
+acr_password: "CHANGE_ME"                 # ← ACR 控制台设置的固定密码

@@ -14,10 +14,10 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
-ACR_REGISTRY="${ACR_REGISTRY:-registry-vpc.cn-hangzhou.aliyuncs.com}"
-# For push from local machine, use public domain (VPC domain only works from ECS)
-ACR_REGISTRY_PUBLIC="${ACR_REGISTRY_PUBLIC:-registry.cn-hangzhou.aliyuncs.com}"
-ACR_NAMESPACE="${ACR_NAMESPACE:-shortlink}"
+# K3s pulls via VPC domain (free); local push uses public domain
+ACR_REGISTRY="${ACR_REGISTRY:-crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com}"
+ACR_REGISTRY_PUBLIC="${ACR_REGISTRY_PUBLIC:-crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com}"
+ACR_NAMESPACE="${ACR_NAMESPACE:-shortlink123}"
 ACR_REPOSITORY="${ACR_REPOSITORY:-shortlink-app}"
 
 # ── Argument parsing ──────────────────────────────────────────

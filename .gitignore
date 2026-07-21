@@ -2,3 +2,6 @@
 
 # 敏感凭证文件（集群 admin 证书 + EC 私钥）
 kubeconfig.yaml
+
+# Ansible group_vars 含真实密码（脱敏模板 all.yml.example 入库）
+ansible/group_vars/all.yml

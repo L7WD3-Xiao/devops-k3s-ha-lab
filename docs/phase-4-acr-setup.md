@@ -1,7 +1,7 @@
 # Phase 4 准备：阿里云 ACR 镜像仓库配置
 
 > 日期：2026-07-21
-> 状态：配置文件已就绪，待填入凭证并执行
+> 状态：配置文件已就绪，凭证已填入（脱敏模板已入库）
 > 前置文档：[phase-3-data-layer.md](phase-3-data-layer.md)（数据层部署）
 
 ---
@@ -33,32 +33,49 @@
 
 **选择个人版**——3 个 namespace、50 个仓库对这个项目绰绰有余，VPC 内网拉取同样支持。
 
+### 1.3 新个人版 vs 旧个人版域名格式
+
+> **重要**：2024-09-09 后创建的个人版实例使用 `crpi-` 开头的独占域名，不再使用 `registry` 开头的共享域名。
+
+| 类型 | 新个人版 (本项目) | 旧个人版 |
+|------|-------------------|---------|
+| 公网 | `crpi-{id}.{region}.personal.cr.aliyuncs.com` | `registry.{region}.aliyuncs.com` |
+| VPC | `crpi-{id}-vpc.{region}.personal.cr.aliyuncs.com` | `registry-vpc.{region}.aliyuncs.com` |
+
+**新个人版的额外限制**：
+- **不支持公网域名拉取镜像**——K3s 必须用 VPC 域名
+- **不支持匿名拉取**——必须配置认证
+- **仅允许一个 RAM 子账号设置登录密码**
+
 ---
 
 ## 2. 网络设计
 
 ### 2.1 VPC 域名 vs 公网域名
 
-阿里云 ACR 同一仓库有两个域名：
+本项目 ACR 实例的两个域名：
 
 ```
-公网:  registry.cn-hangzhou.aliyuncs.com        ← 走公网，产生流量费
-VPC:   registry-vpc.cn-hangzhou.aliyuncs.com     ← 走 VPC 内网，免费且更快
+公网:  crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com       ← 本地推送（开发机）
+VPC:   crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com   ← K3s 拉取（ECS 内网，免费）
 ```
 
-**3 台 ECS 和 ACR 都在 cn-hangzhou region，必须用 VPC 域名**，零流量费且延迟更低。
+**3 台 ECS 和 ACR 都在 cn-hangzhou region，K3s 用 VPC 域名**，零流量费且延迟更低。
+
+> **注意**：新个人版不支持公网域名拉取镜像，所以 K3s 必须使用 VPC 域名。
+> 公网域名仅用于本地开发机推送镜像。
 
 ### 2.2 镜像命名规范
 
 ```
 # 推送时（从本地开发机，走公网）
-registry.cn-hangzhou.aliyuncs.com/shortlink/shortlink-app:v1
+crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
 
-# 拉取时（K3s 集群，走 VPC 内网）
-registry-vpc.cn-hangzhou.aliyuncs.com/shortlink/shortlink-app:v1
+# 拉取时（K3s 集群，走 VPC 内网，免费）
+crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
 ```
 
-> **注意**：同一个镜像在 ACR 中只有一份存储，公网域名和 VPC 域名指向同一个 manifest。
+> 同一个镜像在 ACR 中只有一份存储，公网域名和 VPC 域名指向同一个 manifest。
 > 本地推送用公网域名（开发机不在 VPC 内），K3s 拉取用 VPC 域名。
 
 ---
@@ -92,12 +109,18 @@ registries.yaml 方式的优势：
 
 ### 4.1 Ansible 变量 (`ansible/group_vars/all.yml`)
 
+> **凭证脱敏**：`all.yml` 包含密码，已加入 `.gitignore`，不入版本控制。
+> 脱敏模板见 `ansible/group_vars/all.yml.example`。
+
 ```yaml
-acr_registry: "registry-vpc.cn-hangzhou.aliyuncs.com"
-acr_namespace: "shortlink"
+# VPC 域名（K3s 拉取用，免费）
+acr_registry: "crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com"
+# 公网域名（本地推送用）
+acr_registry_public: "crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com"
+acr_namespace: "shortlink123"
 acr_repository: "shortlink-app"
-acr_username: ""  # ← 填入阿里云账号或 RAM 子账号
-acr_password: ""  # ← 填入 ACR 控制台设置的固定密码
+acr_username: "<your-username>"   # 阿里云账号或 RAM 子账号
+acr_password: "<your-password>"   # ACR 控制台设置的固定密码
 ```
 
 ### 4.2 registries.yaml 模板 (`ansible/playbooks/templates/registries.yaml.j2`)
@@ -116,7 +139,7 @@ mirrors:
       - "https://quay.m.daocloud.io"
 
 configs:
-  "registry-vpc.cn-hangzhou.aliyuncs.com":
+  "crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com":
     auth:
       username: <acr_username>
       password: <acr_password>
@@ -163,6 +186,7 @@ Playbook 执行流程：
 
 1. **开通 ACR 个人版**
    - 阿里云控制台 → 容器镜像服务 → 个人版 → 开启
+   - 选择 Region：华东1（杭州）
 
 2. **设置访问凭证**
    - 容器镜像服务 → 访问凭证 → 设置固定密码
@@ -170,12 +194,12 @@ Playbook 执行流程：
 
 3. **创建 Namespace**
    - 个人版 → 命名空间 → 创建
-   - 名称：`shortlink`
+   - 名称：`shortlink123`
    - Region：华东1（杭州）
 
 4. **创建镜像仓库**
    - 个人版 → 镜像仓库 → 创建
-   - 命名空间：`shortlink`
+   - 命名空间：`shortlink123`
    - 仓库名称：`shortlink-app`
    - 类型：**私有**
    - 代码源：不绑定（手动构建推送）
@@ -183,21 +207,22 @@ Playbook 执行流程：
 ### 5.2 填入凭证并执行配置
 
 ```bash
-# 1. 编辑 group_vars 填入凭证
+# 1. 从脱敏模板创建本地配置
+cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml
 vim ansible/group_vars/all.yml
-# 设置 acr_username 和 acr_password
+# 填入 acr_username 和 acr_password（以及 MySQL 等其他密码）
 
 # 2. 执行 Ansible playbook
 ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml
 
 # 3. 验证 K3s 可以拉取 ACR 镜像（先推送一个测试镜像）
-docker login registry.cn-hangzhou.aliyuncs.com
+docker login crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com
 docker pull hello-world
-docker tag hello-world registry.cn-hangzhou.aliyuncs.com/shortlink/shortlink-app:test
-docker push registry.cn-hangzhou.aliyuncs.com/shortlink/shortlink-app:test
+docker tag hello-world crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
+docker push crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
 
-# 4. 在 K3s 中拉取测试
-kubectl run acr-test --image=registry-vpc.cn-hangzhou.aliyuncs.com/shortlink/shortlink-app:test
+# 4. 在 K3s 中拉取测试（用 VPC 域名）
+kubectl run acr-test --image=crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
 kubectl logs acr-test
 kubectl delete pod acr-test
 ```
@@ -211,15 +236,17 @@ kubectl delete pod acr-test
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | `401 Unauthorized` | 凭证错误或未配置 | 检查 registries.yaml 的 auth 段 |
-| `403 Forbidden` | 仓库类型为公开但未登录 | 确保仓库类型为「私有」+ auth 配置 |
-| 拉取超时 | 用了公网域名而非 VPC 域名 | 镜像地址用 `registry-vpc.` 前缀 |
+| `403 Forbidden` | 新个人版不支持匿名拉取 | 确保仓库类型为「私有」+ auth 配置 |
+| 拉取超时/不可达 | 新个人版不支持公网域名拉取 | K3s 镜像地址必须用 `-vpc` 域名 |
 | K3s 未加载新配置 | registries.yaml 改后未重启 | `systemctl restart k3s` |
-| 本地推送失败 | 用了 VPC 域名（本地不在 VPC） | 本地推送用公网域名 `registry.` |
+| 本地推送失败 | 用了 VPC 域名（本地不在 VPC） | 本地推送用公网域名（不带 `-vpc`） |
+| `ctr image pull` 401 | ctr 不继承 K3s 代理环境变量 | 显式传 `--user` 或依赖 registries.yaml |
 
 ### 6.2 安全建议
 
 - `registries.yaml` 权限设为 `0600`（仅 root 可读）
-- `group_vars/all.yml` 中的密码不入 Git（考虑用 Ansible Vault 加密）
+- `group_vars/all.yml` 包含密码，**已加入 `.gitignore`**，不入版本控制
+- 脱敏模板 `all.yml.example` 入库，真实配置仅本地保留
 - ACR 仓库类型选「私有」，防止镜像泄露
 - 定期更换 ACR 固定密码
 
@@ -236,8 +263,9 @@ kubectl delete pod acr-test
 
 ## 7. 下一步
 
-- [ ] 在阿里云控制台完成 ACR 个人版开通和仓库创建
-- [ ] 填入 `acr_username` 和 `acr_password`
+- [x] 在阿里云控制台完成 ACR 个人版开通和仓库创建
+- [x] 填入 `acr_username` 和 `acr_password`
+- [x] 凭证脱敏（`all.yml` → `.gitignore`，`all.yml.example` 入库）
 - [ ] 执行 `03-configure-acr.yml` playbook
 - [ ] 推送测试镜像验证拉取链路
 - [ ] Phase 4：编写短链服务 Dockerfile + K8s Deployment

@@ -25,10 +25,10 @@ mirrors:
       - "https://quay.m.daocloud.io"
 
 {% if acr_username is defined and acr_username | length > 0 %}
-# ── Alibaba Cloud ACR (VPC intranet — free, fast) ──────────────────
-# VPC domain: registry-vpc.cn-hangzhou.aliyuncs.com
-# Public domain: registry.cn-hangzhou.aliyuncs.com (incurs traffic fee)
-# Always use VPC domain for ECS in the same region.
+# ── Alibaba Cloud ACR Personal Edition (VPC intranet — free, fast) ──
+# VPC domain: crpi-{id}-vpc.{region}.personal.cr.aliyuncs.com (K3s pull)
+# Public domain: crpi-{id}.{region}.personal.cr.aliyuncs.com (local push only)
+# New Personal Edition does NOT support pulling via public domain.
 configs:
   "{{ acr_registry }}":
     auth:
