@@ -3,8 +3,12 @@
 // Endpoints:
 //   POST /api/shorten   {"url": "https://example.com"}  -> {"short_code": "dX7vQ", "short_url": "..."}
 //   GET  /:code          -> 301 Redirect -> original URL
-//   GET  /health         -> {"status": "ok"}   (liveness / readiness probe)
+//   GET  /health         -> {"status": "ok", "version": "v1.0.N"}   (liveness / readiness probe)
 package main
+
+// Version — set at build time via -ldflags or updated for CI/CD verification.
+// This tag is pushed by GitHub Actions as v1.0.{run_number} and detected by FluxCD ImagePolicy.
+const AppVersion = "v1.0.1"
 
 import (
 	"context"
@@ -235,10 +239,10 @@ func (h *Handler) Health(c *gin.Context) {
 	defer cancel()
 
 	if err := h.store.HealthCheck(ctx); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "error", "detail": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "error", "version": AppVersion, "detail": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "version": AppVersion})
 }
 
 func (h *Handler) Shorten(c *gin.Context) {
