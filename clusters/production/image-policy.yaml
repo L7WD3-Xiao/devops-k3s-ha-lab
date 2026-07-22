@@ -3,7 +3,7 @@
 #
 # GitHub Actions pushes tags like v1.0.1, v1.0.2, ...
 # Semver range >=1.0.0 picks the highest version automatically.
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImagePolicy
 metadata:
   name: shortlink-app

@@ -4,7 +4,7 @@
 # Uses the PUBLIC ACR domain because GitHub Actions runners are outside VPC.
 # The Deployment uses the VPC domain for in-cluster pulls (free, fast).
 # FluxCD only updates the tag, not the domain — they don't conflict.
-apiVersion: image.toolkit.fluxcd.io/v1beta2
+apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: shortlink-app
