@@ -1,16 +1,17 @@
 ---
 # FluxCD ImageRepository — watches ACR for new shortlink-app image tags
 #
-# Uses the PUBLIC ACR domain because GitHub Actions runners are outside VPC.
-# The Deployment uses the VPC domain for in-cluster pulls (free, fast).
-# FluxCD only updates the tag, not the domain — they don't conflict.
+# Uses VPC domain — must match kustomization.yaml's images.name for Setters strategy.
+# Node-01 is inside VPC, so the image-reflector-controller can reach the VPC endpoint.
+# GitHub Actions CI still pushes via public domain (runners are outside VPC).
+# The registry is the same — only the access path differs.
 apiVersion: image.toolkit.fluxcd.io/v1
 kind: ImageRepository
 metadata:
   name: shortlink-app
   namespace: flux-system
 spec:
-  image: crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
+  image: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
   interval: 5m
   secretRef:
     name: acr-credentials

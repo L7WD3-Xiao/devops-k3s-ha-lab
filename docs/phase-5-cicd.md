@@ -160,7 +160,114 @@ git revert HEAD~1 && git push
 
 ## 关键踩坑
 
-1. **ghcr.io 从国内直接可达**：FluxCD 镜像托管在 ghcr.io，从 node-01（阿里云杭州）可以直接拉取，走 HTTP/2，约 1.2s 完成 35MB 下载。**不需要代理隧道**。
-2. **node-02/03 无公网不能拉 ghcr.io**：通过 node affinity 将所有 FluxCD controller pod 固定到 node-01。
-3. **GitHub Releases 下载慢**：flux CLI 二进制从 GitHub Releases 直连只有 ~45 KB/s，通过 `gh-proxy.com` 加速到 ~1.2 MB/s（16s 完成）。
-4. **Secrets 不纳入 GitOps**：secret.yaml 继续 gitignore，手动创建。生产环境推荐 Sealed Secrets 或 SOPS。
+### 1. GitHub HTTPS 超时 → SSH Bootstrap 绕过
+
+`flux bootstrap github` 需要用 HTTPS (443) 向 GitHub 写入 deploy key。从阿里云（杭州）到 github.com:443 **TCP 连接超时**（约 120s），无法完成 bootstrap。
+
+**解决方案**：
+- 使用 `flux install --components-extra="image-reflector-controller,image-automation-controller"` 在集群内安装控制器
+- 手动创建 SSH deploy key（`ssh-keygen -t ed25519`）+ GitHub API 创建 deploy key
+- 配置 GitRepository 使用 SSH URL（`git@github.com:`）
+- 手动创建 image automation 相关 CRD
+
+> **教训**：国内环境部署 Kubernetes 时，HTTPS 到 GitHub 可能不通但 SSH (22) 通。FluxCD 官方教程默认使用 `flux bootstrap`，但在国内需要理解其内部机制后手动组装。
+
+### 2. FluxCD Controller Pod 调度到错误节点
+
+FluxCD 镜像托管在 ghcr.io，只有 node-01 能通过代理隧道访问。但默认调度器可能将 controller pods 调度到 node-02/03 导致 `ImagePullBackOff`。
+
+**解决方案**：
+```bash
+kubectl patch deployment -n flux-system <controller> \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"node-01"}}}}}'
+```
+6 个 controller（source、kustomize、helm、image-reflector、image-automation、notification）全部固定到 node-01。
+
+### 3. FluxCD Image CRD apiVersion 变更
+
+FluxCD v2.9.2 中 ImageRepository、ImagePolicy、ImageUpdateAutomation 的 apiVersion 已从 `image.toolkit.fluxcd.io/v1beta2` 迁移到 `image.toolkit.fluxcd.io/v1`。使用旧版本会导致 CRD 校验错误。
+
+**错误信息**：`no matches for kind "ImageRepository" in version "image.toolkit.fluxcd.io/v1beta2"`
+
+**修复**：3 个文件全部改为 `v1`。
+
+### 4. go.sum 必须提交到 Git
+
+CI 中 `go vet` 需要完整的 `go.sum` 文件。之前 `go.sum` 只存在于构建镜像内部，未提交到 Git —— CI checkout 后 `go vet` 直接失败。
+
+**生成方法**：在 node-01 上下载 Go 1.22.12 二进制，设置 `GOPROXY=https://goproxy.cn,direct`，运行 `go mod tidy` 生成完整 go.sum（103 行）。
+
+> **注意**：不能直接查询 `sum.golang.org`（返回的哈希不全），也不能在 nerdctl 构建容器中运行（容器网络不通代理）。必须在有代理的主机上下载 Go 二进制直接执行。
+
+### 5. Go 语法错误：const 必须在 import 之后
+
+添加 `AppVersion` 常量时误放在 `import` 块之前：
+```go
+// ❌ 错误
+const AppVersion = "v1.0.1"
+import (...)
+
+// ✅ 正确
+import (...)
+const AppVersion = "v1.0.1"
+```
+Go 编译器报错：`imports must appear before other declarations`。
+
+### 6. nerdctl + buildkitd: sudo PATH 不包含 /usr/local/bin
+
+`sudo nerdctl build` 调用的 `buildctl` 安装在 `/usr/local/bin`，但 sudo 的 secure_path 默认不包含此路径。
+
+**解决方案**：`sudo PATH="/usr/local/bin:$PATH" nerdctl build ...`
+
+### 7. nerdctl 构建容器内网络隔离
+
+`nerdctl build` 内部运行 `go mod tidy` 时容器无法访问外网（HTTP_PROXY 未传递给 build 容器）。即使设置了 `--build-arg HTTP_PROXY=...`，`go mod tidy` 仍然超时。
+
+**解决方案**：不在构建容器内运行 `go mod tidy`，而是在主机上下载 Go 二进制直接执行，将生成的 `go.sum` 一起提交。
+
+### 8. ImageUpdateAutomation Commit 模板变量变迁
+
+FluxCD v2.9.2 的 commit template 变量与旧版不同：
+
+| 变量 | 状态 | 说明 |
+|------|------|------|
+| `{{ .New.Tag }}` | ❌ 不存在 | `can't evaluate field New in type source.TemplateData` |
+| `{{ .Updated }}` | ❌ 已移除 | `template uses removed '.Updated' field. Please use '.Changed' instead` |
+| `{{ .Changed }}` | ⚠️ 复杂 map | 类型为 `map[string]map[string][]map[string]string`，无法在 commit template 中 range |
+
+**最终方案**：放弃动态模板，使用固定文本 `[ci] update shortlink-app image`。
+
+> **教训**：FluxCD 版本间 template 变量变化大，升级时要查对应版本的文档/GitHub 源码。固定 commit message 在单镜像场景下足够。
+
+### 9. VPC vs 公网 ACR 域名不匹配（Setters 策略）⚠️ 待修复
+
+**问题根因**：
+- `k8s/app-layer/kustomization.yaml` 中 `images.name` 使用 **VPC 域名**：`crpi-xxx-vpc.cn-hangzhou.personal.cr.aliyuncs.com/...`（集群内免流量拉取）
+- `clusters/production/image-repo.yaml` 中 `image` 使用 **公网域名**：`crpi-xxx.cn-hangzhou.personal.cr.aliyuncs.com/...`（考虑到 GitHub Actions 在 VPC 外）
+
+当 ImageUpdateAutomation 的 Setters 策略执行时，它尝试通过 `images.name` 匹配 ImagePolicy 解析的镜像引用。由于 name 使用 VPC 域名但 ImageRepository 返回公网域名的 tag，导致 Setters 无法正确提取 tag，将整个公网镜像引用作为 `newTag` 写入：
+
+```yaml
+# ❌ 错误结果（IUA 写入）
+name: crpi-xxx-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
+newTag: crpi-xxx.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.6
+
+# ✅ 正确结果（期望）
+name: crpi-xxx-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
+newTag: v1.0.6
+```
+
+**解决方案**：将 `image-repo.yaml` 的 `image` 改为 VPC 域名，使 ImageRepository 扫描到的镜像名与 kustomization.yaml 的 `images.name` 一致。node-01 在 VPC 内，可以访问 VPC ACR 域名。
+
+### 10. GitHub PAT scope 限制
+
+Classic PAT 如果没有 `workflow` scope，无法通过 API 修改 `.github/workflows/*` 文件。Git 命令行 push 不受影响，但 GitHub Actions 的某些自动化操作需要此 scope。
+
+### 11. 代理隧道管理
+
+SSH 反向隧道（本机:7897 → node-01:8888）用于在开发环境与集群之间建立稳定通道：
+
+- 断线自动恢复：~95s（ServerAliveInterval 30s × ServerAliveCountMax 3 + 重试间隔 5s）
+- 线性退避重连：连续失败时等待间隔递增（5s → 10s → ... → 最大 60s）
+- 同一个 RemoteForward 端口只能有一个 SSH 连接，后续连接会报错退出
+- 使用 `autossh-tunnel.sh start|stop|restart|status` 管理生命周期
