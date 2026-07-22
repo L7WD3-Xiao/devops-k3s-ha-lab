@@ -1,3 +1,4 @@
+---
 # Kustomization for application layer — shortlink service
 # Managed by FluxCD. Do not edit manually on the cluster.
 #
@@ -5,15 +6,22 @@
 #
 # Image tag is updated by FluxCD ImageUpdateAutomation.
 # The marker comment on the newTag line tells FluxCD where to write.
+#
+# NOTE: images.name uses the short form (without registry domain).
+# Kustomize matches images by suffix, so "shortlink123/shortlink-app" matches
+# "crpi-*-vpc.cn-hangzhou.../shortlink123/shortlink-app" in the Deployment.
+# This is the format used in official FluxCD examples (e.g. name: podinfo).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: app-layer
+
 resources:
   - namespace.yaml
   - configmap.yaml
   - shortlink.yaml
   - ingress.yaml
   - hpa.yaml
+
 images:
-  - name: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
-    newTag: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.7 # {"$imagepolicy": "flux-system:shortlink-app"}
+  - name: shortlink123/shortlink-app
+    newTag: v1.0.7  # {"$imagepolicy": "flux-system:shortlink-app"}
