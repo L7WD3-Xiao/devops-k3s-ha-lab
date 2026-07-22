@@ -1,8 +1,13 @@
 ---
-# GitHub Actions CI — Build and push shortlink-app Docker image to ACR
+# GitHub Actions CI — Build, push shortlink-app Docker image to ACR,
+# and update Kustomization tag for FluxCD GitOps sync.
 #
-# Triggered on push to main when Go code or Dockerfile changes.
-# Tag format: v1.0.{run_number} (semver, detected by FluxCD ImagePolicy).
+# Triggered on push to main when Go code, Dockerfile, or this workflow changes.
+# Tag format: v1.0.{run_number} (semver).
+#
+# NOTE: ImageUpdateAutomation is suspended (FluxCD v2.9.2 Setters strategy bug).
+# Instead, this workflow directly updates k8s/app-layer/kustomization.yaml
+# with the new tag after pushing to ACR. FluxCD picks up the commit and deploys.
 #
 # Secrets (set in GitHub repo Settings > Secrets > Actions):
 #   ACR_REGISTRY  — ACR public domain
@@ -10,7 +15,7 @@
 #   ACR_REPOSITORY — ACR repo name
 #   ACR_USERNAME  — ACR Docker username
 #   ACR_PASSWORD  — ACR Docker password
-name: Build and Push Shortlink App
+name: Build, Push, and Update Kustomization
 
 on:
   push:
@@ -27,9 +32,13 @@ env:
   ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
   ACR_REPOSITORY: ${{ secrets.ACR_REPOSITORY }}
 
+# Needed to push the tag update commit back to the repo
+permissions:
+  contents: write
+
 jobs:
-  build-and-push:
-    name: Build and Push
+  build-and-update:
+    name: Build, Push, and Update
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -81,6 +90,8 @@ jobs:
           context: .
           file: Dockerfile
           push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
           tags: |
             ${{ steps.meta.outputs.full }}
             ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/${{ secrets.ACR_REPOSITORY }}:latest
@@ -91,11 +102,37 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
 
+      # ── Update Kustomization tag (replaces IUA) ───────────
+      # Directly updates the newTag line in kustomization.yaml so
+      # FluxCD picks up the change on the next reconciliation.
+      # This replaces ImageUpdateAutomation which has a Setters
+      # strategy bug in FluxCD v2.9.2.
+      - name: Update Kustomization tag
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          FILE="k8s/app-layer/kustomization.yaml"
+
+          # Replace the newTag value (line format: "    newTag: <old>")
+          sed -i "s/^    newTag: .*/    newTag: ${TAG}/" "$FILE"
+
+          echo "=== Updated ${FILE} ==="
+          grep "newTag:" "$FILE"
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          git diff --cached --quiet || {
+            git commit -m "[ci] update shortlink-app image to ${TAG}"
+            git push
+            echo "✅ Kustomization tag updated and pushed"
+          }
+
       # ── Summary ───────────────────────────────────────────
       - name: Summary
         run: |
           {
-            echo "### :rocket: Build & Push Complete"
+            echo "### :rocket: Build, Push & Kustomization Update Complete"
             echo ""
             echo "| Item | Value |"
             echo "|------|-------|"
@@ -103,5 +140,5 @@ jobs:
             echo "| Tag   | \`${{ steps.meta.outputs.tag }}\` |"
             echo "| Commit | \`${{ github.sha }}\` |"
             echo ""
-            echo "FluxCD ImageRepository will detect the new tag within 5 minutes."
+            echo "FluxCD will detect the kustomization update within 1 minute and deploy."
           } >> $GITHUB_STEP_SUMMARY
