@@ -28,6 +28,10 @@ spec:
         Automated by FluxCD ImageUpdateAutomation.
     push:
       branch: main
+  # IUA suspended: FluxCD v2.9.2 Setters strategy bug — writes full
+  # image reference (domain/ns/repo:tag) as newTag instead of just tag.
+  # Image tag updates are now handled directly by GitHub Actions CI.
+  suspend: true
   update:
     strategy: Setters
     path: ./k8s/app-layer
