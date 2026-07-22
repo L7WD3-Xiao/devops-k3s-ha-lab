@@ -32,8 +32,10 @@ set -uo pipefail
 
 # ==================== 配置 ====================
 SSH_HOST="k3s-node-01-proxy"
-RETRY_INTERVAL=5              # 断线后重连间隔（秒）
-MAX_RETRY_INTERVAL=60         # 连续失败时的最大退避间隔（秒）
+SSH_CLEANUP_HOST="k3s-node-01"           # 用于远端清理的 Host（不带 RemoteForward，避免端口冲突）
+SSH_PORT=8888                            # 远端隧道端口
+RETRY_INTERVAL=5                         # 断线后重连间隔（秒）
+MAX_RETRY_INTERVAL=60                    # 连续失败时的最大退避间隔（秒）
 STATE_DIR="${HOME}/.ssh"
 LOG_FILE="${STATE_DIR}/tunnel.log"
 DAEMON_PID_FILE="${STATE_DIR}/tunnel-daemon.pid"
@@ -61,6 +63,21 @@ read_pid() {
 
 daemon_pid() { read_pid "$DAEMON_PID_FILE"; }
 ssh_pid()     { read_pid "$SSH_PID_FILE"; }
+
+# ==================== 远端端口清理 ====================
+# SSH 断开后，node-01 的 sshd 可能仍持有隧道端口，导致重连失败。
+# 通过不设 RemoteForward 的专用 Host 执行远程清理。
+cleanup_remote_port() {
+    log "Attempting to clean up remote port ${SSH_PORT} via ${SSH_CLEANUP_HOST}..."
+    local result
+    result=$($SSH_BIN -o ConnectTimeout=5 -o BatchMode=yes "$SSH_CLEANUP_HOST" \
+        "sudo fuser -k ${SSH_PORT}/tcp 2>/dev/null; echo 'done'" 2>/dev/null)
+    if [ -n "$result" ]; then
+        log "Remote port cleanup succeeded: ${result}"
+    else
+        log "Remote port cleanup failed or unreachable (host may be down)"
+    fi
+}
 
 # ==================== 守护主循环 ====================
 # autossh 核心逻辑：启动 ssh（后台）→ wait 监控 → 退出后重启
@@ -94,10 +111,20 @@ run_forever() {
         else
             fail_count=$((fail_count + 1))
             log "SSH tunnel exited with error (code=$exit_code, fail #$fail_count)"
-            # 线性退避：每次 +RETRY_INTERVAL，上限 MAX_RETRY_INTERVAL
-            interval=$((RETRY_INTERVAL * fail_count))
-            if [ $interval -gt $MAX_RETRY_INTERVAL ]; then
-                interval=$MAX_RETRY_INTERVAL
+
+            # 检测是否为端口绑定失败（远端端口被旧进程持有）
+            if tail -5 "$LOG_FILE" 2>/dev/null | grep -q "remote port forwarding failed for listen port ${SSH_PORT}"; then
+                log "Detected stale remote port ${SSH_PORT} — cleaning up before retry"
+                cleanup_remote_port
+                # 清理后立即重试，不进退避
+                interval=$RETRY_INTERVAL
+                fail_count=0
+            else
+                # 其他错误：线性退避
+                interval=$((RETRY_INTERVAL * fail_count))
+                if [ $interval -gt $MAX_RETRY_INTERVAL ]; then
+                    interval=$MAX_RETRY_INTERVAL
+                fi
             fi
         fi
 

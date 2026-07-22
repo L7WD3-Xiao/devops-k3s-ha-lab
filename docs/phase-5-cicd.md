@@ -10,25 +10,19 @@ Phase 5 实现短链服务的完整 CI/CD 流水线：
 
 ---
 
-## 📊 当前进度状态（2026-07-22）
+## 新增文件
 
-### ✅ Phase 5 完成！
-
-| 项目 | 状态 | 说明 |
-|------|------|------|
-| GitHub 仓库创建 & 代码推送 | ✅ | `k3s-shortlink` Private repo，SSH push |
-| FluxCD 安装（6 controllers） | ✅ | 全部固定在 node-01（node affinity），`v2.9.2` |
-| Kustomize 结构重组 | ✅ | data-layer + app-layer，扁平结构 |
-| FluxCD Kustomization CR | ✅ | data-layer + app-layer，prune + dependsOn |
-| ACR Secret（flux-system） | ✅ | 含公网 + VPC 双域名凭证 |
-| ImageRepository + ImagePolicy | ✅ | 监控用，VPC 域名，每 5min 扫描 |
-| CI：go vet + go test | ✅ | `go.sum` 已提交，CI 通过 |
-| CI：docker build + push ACR | ✅ | `docker/build-push-action@v6`，含 gha 缓存 |
-| CI：ldflags 注入版本号 | ✅ | `VERSION=${{ github.run_number }}` → `/health` 返回版本 |
-| CI：自动更新 Kustomization tag | ✅ | 替代 IUA，CI 推送后直接 commit tag 更新 |
-| Dockerfile：多阶段构建 | ✅ | golang:1.22-alpine → alpine:3.20，非 root 运行 |
-| 漂移纠正 | ✅ | FluxCD 检测到手动改 replicas 后自动恢复 |
-| IUA 永久暂停 | ✅ | Setters 策略 bug（v2.9.2），由 CI 替代 |
+```
+.github/workflows/build-deploy.yml        # CI pipeline
+clusters/production/
+  ├── data-layer.yaml                      # FluxCD Kustomization (data-layer)
+  ├── app-layer.yaml                       # FluxCD Kustomization (app-layer)
+  ├── image-repo.yaml                      # ImageRepository (watch ACR)
+  ├── image-policy.yaml                    # ImagePolicy (semver)
+  └── image-update.yaml                    # ImageUpdateAutomation (commit tag)
+k8s/data-layer/kustomization.yaml          # Kustomize base template
+k8s/app-layer/kustomization.yaml           # Kustomize base + image marker
+```
 
 ### 🔧 关键架构决策
 
@@ -187,20 +181,6 @@ secrets **不**纳入 GitOps（secret.yaml 继续 gitignore）：
 | 漂移纠正 | FluxCD 检测到集群与 Git 不一致 → 自动纠正（`prune: true`） |
 | FluxCD 卸载 | `flux uninstall`（不影响已部署 Pod） |
 
-## 新增文件
-
-```
-.github/workflows/build-deploy.yml        # CI pipeline
-clusters/production/
-  ├── data-layer.yaml                      # FluxCD Kustomization (data-layer)
-  ├── app-layer.yaml                       # FluxCD Kustomization (app-layer)
-  ├── image-repo.yaml                      # ImageRepository (watch ACR)
-  ├── image-policy.yaml                    # ImagePolicy (semver)
-  └── image-update.yaml                    # ImageUpdateAutomation (commit tag)
-k8s/data-layer/kustomization.yaml          # Kustomize base template
-k8s/app-layer/kustomization.yaml           # Kustomize base + image marker
-```
-
 ## 验证
 
 ```bash
@@ -218,6 +198,24 @@ kubectl -n app-layer scale deployment shortlink --replicas=5
 git revert HEAD~1 && git push
 # 确认部署回退
 ```
+
+## 任务清单
+
+| 项目                           | 状态 | 说明                                                    |
+| ------------------------------ | ---- | ------------------------------------------------------- |
+| GitHub 仓库创建 & 代码推送     | ✅    | `k3s-shortlink` Private repo，SSH push                  |
+| FluxCD 安装（6 controllers）   | ✅    | 全部固定在 node-01（node affinity），`v2.9.2`           |
+| Kustomize 结构重组             | ✅    | data-layer + app-layer，扁平结构                        |
+| FluxCD Kustomization CR        | ✅    | data-layer + app-layer，prune + dependsOn               |
+| ACR Secret（flux-system）      | ✅    | 含公网 + VPC 双域名凭证                                 |
+| ImageRepository + ImagePolicy  | ✅    | 监控用，VPC 域名，每 5min 扫描                          |
+| CI：go vet + go test           | ✅    | `go.sum` 已提交，CI 通过                                |
+| CI：docker build + push ACR    | ✅    | `docker/build-push-action@v6`，含 gha 缓存              |
+| CI：ldflags 注入版本号         | ✅    | `VERSION=${{ github.run_number }}` → `/health` 返回版本 |
+| CI：自动更新 Kustomization tag | ✅    | 替代 IUA，CI 推送后直接 commit tag 更新                 |
+| Dockerfile：多阶段构建         | ✅    | golang:1.22-alpine → alpine:3.20，非 root 运行          |
+| 漂移纠正                       | ✅    | FluxCD 检测到手动改 replicas 后自动恢复                 |
+| IUA 永久暂停                   | ✅    | Setters 策略 bug（v2.9.2），由 CI 替代                  |
 
 ## 关键踩坑
 
@@ -351,30 +349,3 @@ SSH 反向隧道（本机:7897 → node-01:8888）用于在开发环境与集群
 - 线性退避重连：连续失败时等待间隔递增（5s → 10s → ... → 最大 60s）
 - 同一个 RemoteForward 端口只能有一个 SSH 连接，后续连接会报错退出
 - 使用 `autossh-tunnel.sh start|stop|restart|status` 管理生命周期
-
-### 12. GitHub PAT workflow scope 限制 & HTTPS → SSH 切换
-
-Classic PAT 如果没有 `workflow` scope，git push 会被 GitHub 拒绝（即使通过 HTTPS 也如此）：
-
-```
-! [remote rejected] main -> main (refusing to allow a Personal Access Token
-   to create or update workflow `.github/workflows/build-deploy.yml`
-   without `workflow` scope)
-```
-
-**解决方案**：将 git remote 从 HTTPS（PAT 认证）切换到 SSH：
-
-```bash
-# 从 HTTPS 切换到 SSH
-git remote set-url origin git@github.com:L7WD3-Xiao/devops-k3s-ha-lab.git
-```
-
-SSH key 不受 PAT scope 限制，可以推送 workflow 文件。注意 CI workflow 内使用 `GITHUB_TOKEN`（不是 PAT）来回推 tag 更新 commit，它默认有 `contents: write` 权限。
-
-### 13. Kustomize 镜像名短格式不匹配
-
-尝试用短格式 `images.name: shortlink123/shortlink-app` 替代完整域名时，发现 Kustomize 不能正确匹配 Deployment 中的镜像。Kustomize 的镜像名匹配需要**精确匹配**或**域名后路径匹配**。
-
-对于多段路径如 `crpi-xxx.../shortlink123/shortlink-app`，`images.name` 必须使用完整路径才能匹配。短格式 `shortlink123/shortlink-app` 只匹配 `repo/image` 单段结构的镜像（如 `docker.io/library/nginx` → `nginx` 可以匹配）。
-
-**教训**：对于 ACR 的三段式路径（`registry/namespace/repository`），Kustomize 的 `images.name` 需要使用完整路径。

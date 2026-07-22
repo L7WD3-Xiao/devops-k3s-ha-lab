@@ -349,9 +349,3 @@ Seconds_Behind_Source: 0
 
 ---
 
-## 5. 待实施
-
-| 组件 | 说明 | 优先级 |
-|------|------|--------|
-| 阿里云 ACR | 镜像仓库（替代 Harbor） | 高（Phase 4 前置） |
-| FluxCD | GitOps CD（替代 ArgoCD） | 高（Phase 5） |
