@@ -1,4 +1,3 @@
----
 # Kustomization for application layer — shortlink service
 # Managed by FluxCD. Do not edit manually on the cluster.
 #
@@ -14,14 +13,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: app-layer
-
 resources:
   - namespace.yaml
   - configmap.yaml
   - shortlink.yaml
   - ingress.yaml
   - hpa.yaml
-
 images:
   - name: shortlink123/shortlink-app
-    newTag: v1.0.7  # {"$imagepolicy": "flux-system:shortlink-app"}
+    newTag: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.7 # {"$imagepolicy": "flux-system:shortlink-app"}
