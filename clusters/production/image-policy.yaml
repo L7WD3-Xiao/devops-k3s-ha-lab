@@ -1,0 +1,16 @@
+---
+# FluxCD ImagePolicy — selects the latest semver tag from ACR
+#
+# GitHub Actions pushes tags like v1.0.1, v1.0.2, ...
+# Semver range >=1.0.0 picks the highest version automatically.
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: shortlink-app
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: shortlink-app
+  policy:
+    semver:
+      range: ">=1.0.0"

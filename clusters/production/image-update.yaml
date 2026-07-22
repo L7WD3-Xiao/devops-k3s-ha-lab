@@ -1,0 +1,34 @@
+---
+# FluxCD ImageUpdateAutomation — pushes image tag updates back to Git
+#
+# When ImagePolicy detects a new tag, this commits the update to
+# k8s/app-layer/kustomization.yaml (the newTag line with the marker comment).
+# Kustomize Controller then picks up the commit and reconciles.
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageUpdateAutomation
+metadata:
+  name: shortlink-app
+  namespace: flux-system
+spec:
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        email: fluxcd@cluster.local
+        name: fluxcd
+      messageTemplate: |
+        [ci] update shortlink-app image to {{ .New.Tag }}
+
+        Automated by FluxCD ImageUpdateAutomation.
+        New image: {{ .Image.Repository }}:{{ .New.Tag }}
+    push:
+      branch: main
+  update:
+    strategy: Setters
+    path: ./k8s/app-layer

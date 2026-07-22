@@ -1,0 +1,16 @@
+---
+# Kustomization for data layer — Redis HA + MySQL middlewares
+# Managed by FluxCD. Do not edit manually on the cluster.
+#
+# Secret (secret.yaml) is NOT included — it's gitignored and managed manually.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: data-layer
+
+resources:
+  - namespace.yaml
+  - redis-configmap.yaml
+  - redis-statefulset.yaml
+  - sentinel-statefulset.yaml
+  - orchestrator.yaml
+  - proxysql.yaml

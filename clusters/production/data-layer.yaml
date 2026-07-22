@@ -1,0 +1,38 @@
+---
+# FluxCD Kustomization — data-layer
+#
+# Watches ./k8s/data-layer in the Git repo.
+# Applied first (no dependsOn). app-layer depends on this being healthy.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: data-layer
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 3m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./k8s/data-layer
+  prune: true
+  wait: true
+  force: false
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: StatefulSet
+      name: redis
+      namespace: data-layer
+    - apiVersion: apps/v1
+      kind: StatefulSet
+      name: sentinel
+      namespace: data-layer
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: proxysql
+      namespace: data-layer
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: orchestrator
+      namespace: data-layer

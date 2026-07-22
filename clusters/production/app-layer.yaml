@@ -1,0 +1,28 @@
+---
+# FluxCD Kustomization — app-layer
+#
+# Watches ./k8s/app-layer in the Git repo.
+# Depends on data-layer being healthy (DB/Redis must be ready first).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app-layer
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: data-layer
+  interval: 5m
+  retryInterval: 1m
+  timeout: 3m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./k8s/app-layer
+  prune: true
+  wait: true
+  force: false
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: shortlink
+      namespace: app-layer
