@@ -23,7 +23,7 @@ spec:
         email: fluxcd@cluster.local
         name: fluxcd
       messageTemplate: |
-        [ci] update image to {{ range $u := .Updated }}{{ $u.Image }}:{{ $u.Tag }}{{ end }}
+        [ci] update image to {{ range $c := .Changed }}{{ $c.Image }}:{{ $c.Tag }}{{ end }}
 
         Automated by FluxCD ImageUpdateAutomation.
     push:
