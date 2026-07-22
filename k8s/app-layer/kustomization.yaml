@@ -16,4 +16,4 @@ resources:
   - hpa.yaml
 images:
   - name: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
-    newTag: v1.0.6
+    newTag: v1.0.8
