@@ -16,4 +16,4 @@ resources:
   - hpa.yaml
 images:
   - name: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app
-    newTag: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.6 # {"$imagepolicy": "flux-system:shortlink-app"}
+    newTag: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.7 # {"$imagepolicy": "flux-system:shortlink-app"}
