@@ -6,10 +6,6 @@
 //   GET  /health         -> {"status": "ok", "version": "v1.0.N"}   (liveness / readiness probe)
 package main
 
-// Version — set at build time via -ldflags or updated for CI/CD verification.
-// This tag is pushed by GitHub Actions as v1.0.{run_number} and detected by FluxCD ImagePolicy.
-const AppVersion = "v1.0.1"
-
 import (
 	"context"
 	"database/sql"
@@ -27,6 +23,11 @@ import (
 	"github.com/redis/go-redis/v9"
 	_ "github.com/go-sql-driver/mysql"
 )
+
+// ── Build info ─────────────────────────────────────────────────
+// AppVersion — set at build time via -ldflags or updated for CI/CD verification.
+// Pushed by GitHub Actions as v1.0.{run_number}, detected by FluxCD ImagePolicy.
+const AppVersion = "v1.0.1"
 
 // ── Configuration ──────────────────────────────────────────────
 
