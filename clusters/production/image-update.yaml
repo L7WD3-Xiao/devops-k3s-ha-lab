@@ -23,7 +23,7 @@ spec:
         email: fluxcd@cluster.local
         name: fluxcd
       messageTemplate: |
-        [ci] update image to {{ range $c := .Changed }}{{ $c.Image }}:{{ $c.Tag }}{{ end }}
+        [ci] update shortlink-app image
 
         Automated by FluxCD ImageUpdateAutomation.
     push:
