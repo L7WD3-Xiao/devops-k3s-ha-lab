@@ -25,9 +25,10 @@ import (
 )
 
 // ── Build info ─────────────────────────────────────────────────
-// AppVersion — set at build time via -ldflags or updated for CI/CD verification.
-// Pushed by GitHub Actions as v1.0.{run_number}, detected by FluxCD ImagePolicy.
-const AppVersion = "v1.0.1"
+// AppVersion is set at build time via -ldflags (Dockerfile ARG VERSION).
+// CI passes the semver tag (v1.0.{run_number}); local builds default to "dev".
+// Must be a var (not const) for -ldflags -X to work.
+var AppVersion = "dev"
 
 // ── Configuration ──────────────────────────────────────────────
 

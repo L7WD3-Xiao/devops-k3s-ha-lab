@@ -4,11 +4,17 @@
 # Build context: project root (docker build -f Dockerfile .)
 # Go source code lives in app/
 #
+# Build args:
+#   VERSION — semver tag (e.g. v1.0.7), injected via -ldflags into binary
+#             CI passes this; local builds default to "dev"
+#
 # NOTE: On node-01 (no Docker Hub access), build with daocloud mirror URLs:
 #   docker.m.daocloud.io/library/golang:1.22-alpine
 #   docker.m.daocloud.io/library/alpine:3.20
 # The build-push.sh script handles this substitution automatically.
 FROM golang:1.22-alpine AS builder
+
+ARG VERSION=dev
 
 WORKDIR /build
 
@@ -19,8 +25,11 @@ ENV GOPROXY=https://goproxy.cn
 RUN go mod download
 
 # Copy source, generate go.sum, and build static binary
+# -ldflags injects VERSION into main.AppVersion for the /health endpoint
 COPY app/ .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o shortlink .
+RUN go mod tidy && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -X main.AppVersion=${VERSION}" \
+    -o shortlink .
 
 # ── Runtime stage ───────────────────────────────────────────
 # alpine provides ca-certificates (needed for HTTPS redirects) + tzdata
