@@ -1,6 +1,6 @@
 # Phase 5: FluxCD GitOps + GitHub Actions CI/CD
 
-## 概述
+## 1. 概述
 
 Phase 5 实现短链服务的完整 CI/CD 流水线：
 
@@ -10,7 +10,7 @@ Phase 5 实现短链服务的完整 CI/CD 流水线：
 
 ---
 
-## 新增文件
+## 2. 新增文件
 
 ```
 .github/workflows/build-deploy.yml        # CI pipeline
@@ -24,9 +24,9 @@ k8s/data-layer/kustomization.yaml          # Kustomize base template
 k8s/app-layer/kustomization.yaml           # Kustomize base + image marker
 ```
 
-## 核心组件
+## 3. 核心组件
 
-### K3s 集群侧
+### 3.1 K3s 集群侧
 | 组件 | 命名空间 | 功能 |
 |------|---------|------|
 | source-controller | flux-system | 轮询 GitHub 仓库，拉取 manifests |
@@ -38,12 +38,12 @@ k8s/app-layer/kustomization.yaml           # Kustomize base + image marker
 
 > FluxCD 6 个 controller 全部通过 node affinity 固定在 node-01（node-02/03 无公网，无法拉取 ghcr.io 镜像）。
 
-### GitHub 侧
+### 3.2 GitHub 侧
 - **仓库**：`k3s-shortlink`（Private）
 - **CI Workflow**：`.github/workflows/build-deploy.yml`
 - **Secrets**：ACR 凭证（`ACR_REGISTRY`, `ACR_NAMESPACE`, `ACR_REPOSITORY`, `ACR_USERNAME`, `ACR_PASSWORD`）
 
-## Kustomize 结构
+## 4. Kustomize 结构
 
 ```
 k8s/
@@ -66,9 +66,9 @@ k8s/
 
 > 不引入 base/overlays 层级，保持扁平结构。项目规模小，过度分层反而增加认知负担。
 
-## FluxCD 资源
+## 5. FluxCD 资源
 
-### Kustomization（声明式同步）
+### 5.1 Kustomization（声明式同步）
 
 **data-layer**：watch `./k8s/data-layer`
 - `prune: true` — Git 删除的资源自动从集群删除
@@ -80,7 +80,7 @@ k8s/
 - `healthChecks` — 等待 shortlink Deployment 健康
 - 镜像 tag 由 ImageUpdateAutomation 自动更新
 
-### Image Automation（镜像自动更新）
+### 5.2 Image Automation（镜像自动更新）
 
 ```
 GitHub Actions (CI)
@@ -119,7 +119,7 @@ KustomizeController
 
 > **ImageUpdateAutomation** 流程因 Bug 弃用，参见下方 tag 策略
 
-## 镜像 tag 策略
+## 6. 镜像 tag 策略
 
 - CI tag 格式：`v1.0.{github.run_number}`（semver）
 - FluxCD ImagePolicy：`semver: ">=1.0.0"`（自动选最高版本）
@@ -141,7 +141,7 @@ git push → CI build + push ACR → CI update kustomization → CI push commit
                                                             滚动更新完成
 ```
 
-## CI/CD 流程
+## 7. CI/CD 流程
 
 ```
 git push main (app/ or Dockerfile changed)
@@ -159,7 +159,7 @@ SourceController 检测新 commit → KustomizeController 滚动更新
 Traefik → shortlink:8080 (新版本)
 ```
 
-## Secrets 管理
+## 8. Secrets 管理
 
 secrets **不**纳入 GitOps（secret.yaml 继续 gitignore）：
 
@@ -169,7 +169,7 @@ secrets **不**纳入 GitOps（secret.yaml 继续 gitignore）：
 | `shortlink-secrets` | app-layer | 应用数据库密码 | 手动 `kubectl create` |
 | `acr-credentials` | flux-system | ACR Docker 密码 | 手动 `kubectl create` |
 
-## 回滚
+## 9. 回滚
 
 | 场景 | 操作 |
 |------|------|
@@ -178,7 +178,7 @@ secrets **不**纳入 GitOps（secret.yaml 继续 gitignore）：
 | 漂移纠正 | FluxCD 检测到集群与 Git 不一致 → 自动纠正（`prune: true`） |
 | FluxCD 卸载 | `flux uninstall`（不影响已部署 Pod） |
 
-## 验证
+## 10. 验证
 
 ```bash
 # 1. FluxCD 状态
@@ -196,7 +196,7 @@ git revert HEAD~1 && git push
 # 确认部署回退
 ```
 
-## 任务清单
+## 11. 验证清单
 
 | 项目                           | 状态 | 说明                                                    |
 | ------------------------------ | ---- | ------------------------------------------------------- |
@@ -214,9 +214,9 @@ git revert HEAD~1 && git push
 | 漂移纠正                       | ✅    | FluxCD 检测到手动改 replicas 后自动恢复                 |
 | IUA 永久暂停                   | ✅    | Setters 策略 bug（v2.9.2），由 CI 替代                  |
 
-## 关键踩坑
+## 12. 关键踩坑
 
-### 1. GitHub HTTPS 超时 → SSH Bootstrap 绕过
+### 12.1 GitHub HTTPS 超时 → SSH Bootstrap 绕过
 
 `flux bootstrap github` 需要用 HTTPS (443) 向 GitHub 写入 deploy key。从阿里云（杭州）到 github.com:443 **TCP 连接超时**（约 120s），无法完成 bootstrap。
 
@@ -228,7 +228,7 @@ git revert HEAD~1 && git push
 
 > **教训**：国内环境部署 Kubernetes 时，HTTPS 到 GitHub 可能不通但 SSH (22) 通。FluxCD 官方教程默认使用 `flux bootstrap`，但在国内需要理解其内部机制后手动组装。
 
-### 2. FluxCD Controller Pod 调度到错误节点
+### 12.2 FluxCD Controller Pod 调度到错误节点
 
 FluxCD 镜像托管在 ghcr.io，只有 node-01 能通过代理隧道访问。但默认调度器可能将 controller pods 调度到 node-02/03 导致 `ImagePullBackOff`。
 
@@ -239,7 +239,7 @@ kubectl patch deployment -n flux-system <controller> \
 ```
 6 个 controller（source、kustomize、helm、image-reflector、image-automation、notification）全部固定到 node-01。
 
-### 3. FluxCD Image CRD apiVersion 变更
+### 12.3 FluxCD Image CRD apiVersion 变更
 
 FluxCD v2.9.2 中 ImageRepository、ImagePolicy、ImageUpdateAutomation 的 apiVersion 已从 `image.toolkit.fluxcd.io/v1beta2` 迁移到 `image.toolkit.fluxcd.io/v1`。使用旧版本会导致 CRD 校验错误。
 
@@ -247,7 +247,7 @@ FluxCD v2.9.2 中 ImageRepository、ImagePolicy、ImageUpdateAutomation 的 apiV
 
 **修复**：3 个文件全部改为 `v1`。
 
-### 4. go.sum 必须提交到 Git
+### 12.4 go.sum 必须提交到 Git
 
 CI 中 `go vet` 需要完整的 `go.sum` 文件。之前 `go.sum` 只存在于构建镜像内部，未提交到 Git —— CI checkout 后 `go vet` 直接失败。
 
@@ -255,7 +255,7 @@ CI 中 `go vet` 需要完整的 `go.sum` 文件。之前 `go.sum` 只存在于�
 
 > **注意**：不能直接查询 `sum.golang.org`（返回的哈希不全），也不能在 nerdctl 构建容器中运行（容器网络不通代理）。必须在有代理的主机上下载 Go 二进制直接执行。
 
-### 5. Go 语法错误：const 必须在 import 之后
+### 12.5 Go 语法错误：const 必须在 import 之后
 
 添加 `AppVersion` 常量时误放在 `import` 块之前：
 ```go
@@ -269,19 +269,19 @@ const AppVersion = "v1.0.1"
 ```
 Go 编译器报错：`imports must appear before other declarations`。
 
-### 6. nerdctl + buildkitd: sudo PATH 不包含 /usr/local/bin
+### 12.6 nerdctl + buildkitd: sudo PATH 不包含 /usr/local/bin
 
 `sudo nerdctl build` 调用的 `buildctl` 安装在 `/usr/local/bin`，但 sudo 的 secure_path 默认不包含此路径。
 
 **解决方案**：`sudo PATH="/usr/local/bin:$PATH" nerdctl build ...`
 
-### 7. nerdctl 构建容器内网络隔离
+### 12.7 nerdctl 构建容器内网络隔离
 
 `nerdctl build` 内部运行 `go mod tidy` 时容器无法访问外网（HTTP_PROXY 未传递给 build 容器）。即使设置了 `--build-arg HTTP_PROXY=...`，`go mod tidy` 仍然超时。
 
 **解决方案**：不在构建容器内运行 `go mod tidy`，而是在主机上下载 Go 二进制直接执行，将生成的 `go.sum` 一起提交。
 
-### 8. ImageUpdateAutomation Commit 模板变量变迁
+### 12.8 ImageUpdateAutomation Commit 模板变量变迁
 
 FluxCD v2.9.2 的 commit template 变量与旧版不同：
 
@@ -295,7 +295,7 @@ FluxCD v2.9.2 的 commit template 变量与旧版不同：
 
 > **教训**：FluxCD 版本间 template 变量变化大，升级时要查对应版本的文档/GitHub 源码。固定 commit message 在单镜像场景下足够。
 
-### 9. VPC vs 公网 ACR 域名不匹配 & IUA Setters 策略 Bug ✅ 已解决
+### 12.9 VPC vs 公网 ACR 域名不匹配 & IUA Setters 策略 Bug ✅ 已解决
 
 这是 Phase 5 最棘手的 bug。经过多轮排查，最终通过**废弃 IUA、改由 CI 直接更新 tag** 的方案解决。
 
@@ -334,11 +334,11 @@ newTag: v1.0.7
 
 IUA 永久暂停（`spec.suspend: true`），ImageRepository + ImagePolicy 保留用于监控。
 
-### 10. GitHub PAT scope 限制
+### 12.10 GitHub PAT scope 限制
 
 Classic PAT 如果没有 `workflow` scope，无法通过 API 修改 `.github/workflows/*` 文件。Git 命令行 push 不受影响，但 GitHub Actions 的某些自动化操作需要此 scope。
 
-### 11. 代理隧道管理
+### 12.11 代理隧道管理
 
 SSH 反向隧道（本机:7897 → node-01:8888）用于在开发环境与集群之间建立稳定通道：
 

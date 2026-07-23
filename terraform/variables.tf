@@ -13,7 +13,7 @@ variable "alicloud_region" {
 # ═══════════════════════════════════════════════
 
 variable "vpc_cidr" {
-  description = "新建 VPC 网段（与 SWAS 172.16.0.0/12 隔离）"
+  description = "VPC 网段"
   type        = string
   default     = "192.168.0.0/16"
 }
@@ -105,22 +105,6 @@ variable "create_eip" {
   description = "是否创建按量 EIP 并绑定到 k3s-node-01。按流量计费，~0.8 元/GB。"
   type        = bool
   default     = false
-}
-
-# ═══════════════════════════════════════════════
-# SWAS 跳板配置
-# ═══════════════════════════════════════════════
-
-variable "swas_private_ip" {
-  description = "现有 SWAS 实例内网 IP（配置内网互通后可访问 ECS）"
-  type        = string
-  default     = "172.26.5.95"
-}
-
-variable "swas_public_ip" {
-  description = "现有 SWAS 实例公网 IP（SSH 跳板入口）"
-  type        = string
-  default     = "47.114.124.150"
 }
 
 # ═══════════════════════════════════════════════

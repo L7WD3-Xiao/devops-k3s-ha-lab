@@ -32,7 +32,7 @@ locals {
 }
 
 # ═══════════════════════════════════════════════
-# VPC + VSwitch（新建，不复用 SWAS VPC）
+# VPC + VSwitch
 # ═══════════════════════════════════════════════
 
 resource "alicloud_vpc" "k3s" {
@@ -145,7 +145,7 @@ resource "alicloud_security_group_rule" "https" {
 }
 
 # ═══════════════════════════════════════════════
-# k3s-node-01（首台，Phase B，需确认费用）
+# k3s-node-01（首台，Phase B）
 # ═══════════════════════════════════════════════
 
 resource "alicloud_instance" "k3s_node_01" {
@@ -176,7 +176,7 @@ resource "alicloud_instance" "k3s_node_01" {
 }
 
 # ═══════════════════════════════════════════════
-# k3s-node-02（Phase D，需确认费用）
+# k3s-node-02（Phase D）
 # ═══════════════════════════════════════════════
 
 resource "alicloud_instance" "k3s_node_02" {
@@ -207,7 +207,7 @@ resource "alicloud_instance" "k3s_node_02" {
 }
 
 # ═══════════════════════════════════════════════
-# k3s-node-03（Phase E，需确认费用）
+# k3s-node-03（Phase E）
 # ═══════════════════════════════════════════════
 
 resource "alicloud_instance" "k3s_node_03" {

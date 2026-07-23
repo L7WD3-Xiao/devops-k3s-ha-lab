@@ -1,12 +1,12 @@
 # Phase 4：短链服务应用部署
 
-## 概述
+## 1. 概述
 
 在 K3s 集群上部署 Go 编写的短链服务，连接 Phase 3 的数据层（MySQL via ProxySQL + Redis via Sentinel），通过 Ingress 对外暴露。
 
 **状态：已完成 (2026-07-22)**
 
-## 架构
+## 2. 架构
 
 ```
                         External Traffic
@@ -33,7 +33,7 @@
         └─────────┘  └─────────┘    └─────────────┘
 ```
 
-## 文件结构
+## 3. 文件结构
 
 ```
 app/
@@ -53,9 +53,9 @@ scripts/
   build-push.sh        构建推送脚本 (支持 docker / nerdctl)
 ```
 
-## 应用设计
+## 4. 应用设计
 
-### API
+### 4.1 API
 
 | Method | Path | 功能 |
 |--------|------|------|
@@ -63,14 +63,14 @@ scripts/
 | GET | `/:code` | 301 重定向到原始 URL |
 | GET | `/health` | 健康检查 (Liveness/Readiness Probe) |
 
-### 短码生成
+### 4.2 短码生成
 
 - **策略**：INSERT 获取自增 ID → Base62 编码 → UPDATE 写入 short_code
 - **优点**：无碰撞、确定性、展示 ProxySQL 读写分离
 - **字符集**：`0-9 a-z A-Z` (62 字符)
 - **容量**：6 位 ≈ 568 亿组合
 
-### 数据流
+### 4.3 数据流
 
 **写路径 (POST /api/shorten)**:
 1. INSERT url_mapping → ProxySQL → MySQL Master (hostgroup 1)
@@ -83,15 +83,15 @@ scripts/
 2. 缓存未命中 → SELECT → ProxySQL → MySQL Slave (hostgroup 2)
 3. 回填 Redis 缓存 → 301 重定向
 
-### 优雅关闭
+### 4.4 优雅关闭
 
 - 监听 SIGTERM 信号
 - 5 秒超时优雅关闭 HTTP Server
 - preStop hook + terminationGracePeriodSeconds=15
 
-## 镜像构建
+## 5. 镜像构建
 
-### 工具：nerdctl + BuildKit (在 node-01 上)
+### 5.1 工具：nerdctl + BuildKit (在 node-01 上)
 
 由于本地无 Docker，且 K3s 节点上也没有 Docker，在 node-01 上使用 nerdctl (Docker 兼容 CLI) + BuildKit 构建镜像。
 
@@ -101,7 +101,7 @@ scripts/
 - 基础镜像通过 daocloud 镜像源拉取 (`docker.m.daocloud.io/library/`)
 - Go 模块通过 goproxy.cn 下载（无需代理）
 
-### 多阶段 Dockerfile
+### 5.2 多阶段 Dockerfile
 
 ```dockerfile
 # Build stage
@@ -128,7 +128,7 @@ CMD ["./shortlink"]
 - 非 root 用户运行 (UID 10001)
 - 包含 ca-certificates (HTTPS 重定向需要) + tzdata
 
-### 构建命令
+### 5.3 构建命令
 
 ```bash
 # 在 node-01 上执行
@@ -147,7 +147,7 @@ nerdctl login crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com
 nerdctl push crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
 ```
 
-### 踩坑记录
+### 5.4 踩坑记录
 
 1. **go.sum 缺失**：`go mod download` 下载了模块但未生成完整 `go.sum`，导致 `go build` 报 `missing go.sum entry`。
    - 修复：在 Dockerfile 中 `go build` 前加 `go mod tidy`
@@ -158,9 +158,9 @@ nerdctl push crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlin
 3. **Docker Hub auth.docker.io 被墙**：buildkitd 拉取 Docker Hub 镜像时需要访问 auth.docker.io 认证，该域名被墙。
    - 修复：Dockerfile 中直接使用 `docker.m.daocloud.io/library/` 镜像 URL 绕过 Docker Hub 认证。
 
-## K8s 部署
+## 6. K8s 部署
 
-### 部署顺序
+### 6.1 部署顺序
 
 ```bash
 # 通过 SSH 在 node-01 上执行 (本机无 kubectl)
@@ -175,7 +175,7 @@ cat k8s/app-layer/*.yaml | ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl appl
 5. Ingress (Traefik :80 → :8080)
 6. HPA (2-6, CPU 70%) + PDB (minAvailable 1)
 
-### 验证结果
+### 6.2 验证结果
 
 | 项目 | 结果 |
 |------|------|
@@ -187,7 +187,7 @@ cat k8s/app-layer/*.yaml | ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl appl
 | HPA | cpu 2%/70%, 2 replicas (metrics-server 正常) |
 | Ingress | Traefik, 3 节点 IP, port 80 |
 
-### 外部访问测试
+### 6.3 外部访问测试
 
 ```bash
 # 健康检查
@@ -206,21 +206,21 @@ curl -v http://<集群公网入口IP>/6
 # → Location: https://kubernetes.io
 ```
 
-## ACR 镜像地址
+## 7. ACR 镜像地址
 
 - **推送 (公网)**：`crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1`
 - **拉取 (VPC)**：`crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1`
 
 K3s registries.yaml 已配置 VPC 域名认证，全局免 imagePullSecret。
 
-## 安全注意事项
+## 8. 安全注意事项
 
 - MySQL 密码通过 K8s Secret 注入，不硬编码在镜像中
 - `secret.yaml` 已加入 `.gitignore`，仅 `secret.yaml.example` 入库
 - 容器以非 root 用户 (UID 10001) 运行
 - ConfigMap 只包含非敏感信息，敏感信息全部走 Secret
 
-## 下一步
+## 9. 下一步
 
 - Phase 5：CI/CD (FluxCD GitOps) — Git push 自动触发构建和部署
 - Phase 6：安全加固 (RBAC + NetworkPolicy + Trivy)

@@ -144,9 +144,9 @@ variable "create_eip"     { default = false }
 3. 单独 resource block 便于 `terraform apply -target` 精确操作单台实例
 4. 后续升级规格时也可 `-target` 单台操作，保持 etcd quorum
 
-#### 3.2.2 VPC 新建（非复用 SWAS VPC）
+#### 3.2.2 VPC 新建
 
-原方案计划复用现有 SWAS 的 VPC (172.16.0.0/12)，实施时发现 SWAS 与 ECS API 隔离，VPC 不互通。改为新建独立 VPC (192.168.0.0/16)，所有资源 Terraform 原生管理。
+新建独立 VPC (192.168.0.0/16)，所有资源 Terraform 原生管理。
 
 #### 3.2.3 EIP 按量计费
 
@@ -223,7 +223,7 @@ alicloud_vpc.k3s                    ── 新建 VPC
 #!/bin/bash
 # cloud-init user-data for K3s cluster nodes (templatefile 渲染)
 # 关键步骤：
-# 1. 关闭 swap
+# 1. 关闭 swap (k8s明确要求)
 # 2. 内核参数 (ip_forward, bridge-nf-call-iptables)
 # 3. 安装基础包 (dnf)
 # 4. 时区 Asia/Shanghai + chronyd
@@ -234,12 +234,14 @@ alicloud_vpc.k3s                    ── 新建 VPC
 ```
 
 > **踩坑修复**：Alibaba Cloud Linux 3 (RHEL 8 系) 包名 `iproute` 而非 `iproute2`（Debian 系）。cloud-init 首次执行时 `dnf install iproute2` 失败，改为 `iproute` 后通过。
+>
+> 关闭 swap 出于集群性能考虑：[k8s优化之关闭swap - Leo_Yide - 博客园](https://www.cnblogs.com/leojazz/p/18932239)
 
 ---
 
 ## 4. 实施时间线
 
-### Phase A: 免费资源（2026-07-15）
+### Phase A: 网络/安全组配置（2026-07-15）
 
 > 费用：0 元
 
