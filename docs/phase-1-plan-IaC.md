@@ -22,7 +22,7 @@
 | VPC | 复用 SWAS VPC (172.16.0.0/12) | **新建 VPC (192.168.0.0/16)** |
 | vSwitch | 复用 vsw-bp171csb7bkm1n0156f3b (cn-hangzhou-i) | **新建 vswitch (192.168.1.0/24, cn-hangzhou-h)** |
 | node-01 | 复用现有 SWAS 实例 (import) | **新建 ECS** |
-| 公网访问 | SWAS 做 Jump Host (47.114.124.150) | **node-01 绑按量 EIP (116.62.168.245)** |
+| 公网访问 | SWAS 做 Jump Host (47.114.124.150) | **node-01 绑按量 EIP (<集群公网入口IP>)** |
 | 实例规格 | 3 台全部 2C2G | **node-01 2C2G, node-02/03 2C4G**（Phase 3 前升级） |
 | 密钥对 | 控制台预创建 | **Terraform 自动创建并导入公钥** |
 
@@ -36,7 +36,7 @@
 | 安全组 | sg-bp1807co8efnr2upllnb | K3s 集群安全组 |
 | SSH 密钥对 | k3s-cluster-key | Terraform 创建，导入本机公钥 |
 | ECS × 3 | 见 §2.1 | node-01 + EIP, node-02/03 纯内网 |
-| EIP | 116.62.168.245 | 绑定 node-01, PayByTraffic |
+| EIP | <集群公网入口IP> | 绑定 node-01, PayByTraffic |
 
 ---
 
@@ -46,7 +46,7 @@
 
 | 节点 | 实例类型 | vCPU | 内存 | 系统盘 | 内网 IP | EIP | K3s 角色 |
 |------|---------|------|------|--------|---------|-----|---------|
-| k3s-node-01 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 192.168.1.228 | 116.62.168.245 | server + etcd |
+| k3s-node-01 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 192.168.1.228 | <集群公网入口IP> | server + etcd |
 | k3s-node-02 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.230 | — | server + etcd |
 | k3s-node-03 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.229 | — | server + etcd |
 
@@ -65,8 +65,7 @@
       ▼                 │   │                                      │      │
   ┌────────┐            │   │  ┌─────────────┐  ┌─────────────┐   │      │
   │  EIP   │──── SSH ───┼──▶│  │  k3s-node-01│  │ k3s-node-02 │   │      │
-  │116.62  │  直连 22   │   │  │ 192.168.1.228│  │192.168.1.230│   │      │
-  │.168.245│            │   │  │ K3s Server  │  │ K3s Server  │   │      │
+  │ 公网IP │  直连 22   │   │  │ 192.168.1.228│  │192.168.1.230│   │      │
   └────────┘            │   │  │ + etcd      │  │ + etcd      │   │      │
        │ 互联网出口      │   │  │ 2C2G 40G    │  │ 2C4G 40G    │   │      │
        ▼                │   │  └──────┬──────┘  └──────┬──────┘   │      │
@@ -266,7 +265,7 @@ terraform apply
 
 创建内容：
 - ECS: i-bp18iw6uhnyntovdgn02, 内网 192.168.1.228
-- EIP: 116.62.168.245 (PayByTraffic, 10Mbps 带宽上限)
+- EIP: <集群公网入口IP> (PayByTraffic, 10Mbps 带宽上限)
 
 **踩坑**：cloud-init 首次执行失败 — `dnf install iproute2` 包名错误。修复 `user-data.sh` 中 `iproute2` → `iproute`，后续节点不受影响。
 
@@ -348,7 +347,7 @@ Phase 1 完成后逐项验证：
 ```
 # ~/.ssh/config
 Host k3s-node-01
-    HostName 116.62.168.245
+    HostName <集群公网入口IP>
     User ops
     IdentityFile ~/.ssh/id_rsa
 

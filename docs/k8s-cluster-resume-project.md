@@ -12,12 +12,12 @@
 
 | 原则 | 说明 |
 |------|------|
-| 校招适配 | 3 台 2C4G 虚拟机 |
+| 校招适配 | 1 台 2C2G + 2 台 2C4G |
 | 生产级标准 | 架构设计、配置写法、安全策略对标生产环境 |
 | IaC 优先 | 所有部署通过代码完成，环境可一键复现 |
 | 重点突出 | 聚焦集群基础设施运维，业务逻辑极简 |
 
-> 3 台 2C2G 虚拟机也能跑，但很勉强且要砍掉Harbor。3 台 2C4G 虽不是零门槛，但作为集群已经较为低配。
+> 2C2G 虚拟机也能跑，但很勉强且要砍掉Harbor（且很可能要砍掉数据库主从）。2C4G 虽不是零门槛，但作为集群已经较为低配。
 
 ---
 
@@ -64,8 +64,8 @@
 
 | 方案 | 配置 | 成本 | 优缺点 |
 |------|------|------|--------|
-| A. 云 VPS（推荐） | 3 x 2C4G | ~200 元/月 | 真实公网 IP，可体验完整 Ingress；学生优惠更低 |
-| B. 本地虚拟机 | 3 x 2C4G VM | 免费 | 零成本可重建；无公网 IP，Ingress 用 Hosts 模拟 |
+| A. 云 VPS（推荐） | 3 x VPS | ~200 元/月 | 真实公网 IP，可体验完整 Ingress；学生优惠更低 |
+| B. 本地虚拟机 | 3 x VM | 免费 | 零成本可重建；无公网 IP，Ingress 用 Hosts 模拟 |
 | C. 混合方案 | 1 VPS + 2 本地 VM | ~50 元/月 | 兼顾成本与真实网络 |
 
 **推荐方案 B**：本地虚拟机，零成本，随时销毁重建。简历注明"基于本地虚拟化环境模拟生产集群"即可。
@@ -260,7 +260,7 @@ CREATE TABLE url_mapping (
 
 | 阶段 | 内容 | 产出 |
 |------|------|------|
-| Phase 1 | 基础环境搭建 | 3 节点 VM、SSH 免密、Ansible Inventory |
+| Phase 1 | 基础环境搭建 | 3 节点 VM/VPS、SSH 免密、Ansible Inventory |
 | Phase 2 | K3s 集群部署 | Ansible Playbook 一键部署 K3s HA 集群 |
 | Phase 3 | 数据层部署 | MySQL 物理机主从 + Redis StatefulSet |
 | Phase 4 | 应用部署 | 短链服务 Go 代码 + Dockerfile + Helm Chart |
@@ -268,3 +268,5 @@ CREATE TABLE url_mapping (
 | Phase 6 | 安全加固 | RBAC + NetworkPolicy + Trivy |
 | Phase 7 | 备份容灾 | Velero + xtrabackup + 恢复演练 |
 | Phase 8 | 文档整理 | README、架构文档、部署手册 |
+
+> 本项目中 Phase 1 采用公有云，使用 Terraform IaC 配置

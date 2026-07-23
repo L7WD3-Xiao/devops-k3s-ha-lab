@@ -210,8 +210,8 @@ git push (app/ 或 Dockerfile 变更)
 | **Phase 1** 🏛️ | IaC：Terraform 基础设施创建 | 新建 VPC + 3 ECS + EIP + 安全组，cloud-init 初始化 |
 | **Phase 2** ☸️ | K3s HA 集群部署 | Ansible Playbook 一键部署 K3s HA（embedded etcd） |
 | **Phase 3** 🗄️ | 数据层部署 | MySQL 物理机主从 + Orchestrator + ProxySQL + Redis Sentinel |
-| **Phase 4** 🚀 | 应用部署 | 短链服务 Go + Gin、多阶段构建、Traefik Ingress |
-| **Phase 5** 🔄 | CI/CD 流水线 | GitHub Actions + ACR + FluxCD GitOps（已实现 ✅） |
+| **Phase 4** 🚀 | 应用部署 | 短链服务 Go + Gin、多阶段构建、Traefik Ingress + ACR |
+| **Phase 5** 🔄 | CI/CD 流水线 | GitHub Actions + FluxCD GitOps（已实现 ✅） |
 | **Phase 6** 🔒 | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描 |
 | **Phase 7** 💾 | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
 | **Phase 8** 📖 | 文档整理 | 架构文档、部署手册、简历产出物整理 |

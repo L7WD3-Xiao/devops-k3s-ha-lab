@@ -182,7 +182,7 @@ cat k8s/app-layer/*.yaml | ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl appl
 | Pod 状态 | 2/2 Running, 分布在 node-02 + node-03 (反亲和生效) |
 | 镜像拉取 | VPC 域名 1.77s 拉取完成 (7.5MB) |
 | 健康检查 | `GET /health` → `{"status":"ok"}` |
-| 创建短链 | `POST /api/shorten` → `{"short_code":"6","short_url":"http://116.62.168.245/6"}` |
+| 创建短链 | `POST /api/shorten` → `{"short_code":"6","short_url":"http://<集群公网入口IP>/6"}` |
 | 短链跳转 | `GET /6` → 301 → `https://kubernetes.io` |
 | HPA | cpu 2%/70%, 2 replicas (metrics-server 正常) |
 | Ingress | Traefik, 3 节点 IP, port 80 |
@@ -191,17 +191,17 @@ cat k8s/app-layer/*.yaml | ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl appl
 
 ```bash
 # 健康检查
-curl http://116.62.168.245/health
+curl http://<集群公网入口IP>/health
 # → {"status":"ok"}
 
 # 创建短链
-curl -X POST http://116.62.168.245/api/shorten \
+curl -X POST http://<集群公网入口IP>/api/shorten \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://kubernetes.io"}'
-# → {"short_code":"6","short_url":"http://116.62.168.245/6"}
+# → {"short_code":"6","short_url":"http://<集群公网入口IP>/6"}
 
 # 短链跳转 (注意：用 GET 不是 HEAD)
-curl -v http://116.62.168.245/6
+curl -v http://<集群公网入口IP>/6
 # → HTTP/1.1 301 Moved Permanently
 # → Location: https://kubernetes.io
 ```

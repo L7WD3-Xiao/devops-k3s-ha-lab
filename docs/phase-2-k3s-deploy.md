@@ -35,7 +35,7 @@
 | HA 模式 | 3-Server + embedded etcd |
 | 网络插件 | Flannel (K3s 内置) |
 | 数据存储 | embedded etcd (3 副本) |
-| API Server | `https://116.62.168.245:6443` |
+| API Server | `https://<集群公网入口IP>:6443` |
 | Ingress | Traefik (K3s 内置) |
 
 ### 1.3 产出物
@@ -55,7 +55,7 @@
 ### 2.1 基础设施（Phase 1 产出）
 
 - ✅ 3 台 ECS 已创建，cloud-init 完成（ops 用户 + SSH 密钥 + 基础包）
-- ✅ node-01 绑定 EIP (116.62.168.245)，可从本机 SSH 访问
+- ✅ node-01 绑定 EIP (<集群公网入口IP>)，可从本机 SSH 访问
 - ✅ 3 节点内网互通（192.168.1.0/24）
 - ✅ node-02/03 无公网 IP（通过 node-01 分发二进制和镜像）
 
@@ -65,12 +65,12 @@
 
 ```sshconfig
 Host k3s-node-01
-    HostName 116.62.168.245
+    HostName <集群公网入口IP>
     User ops
     IdentityFile ~/.ssh/id_rsa
 
 Host k3s-node-01-proxy
-    HostName 116.62.168.245
+    HostName <集群公网入口IP>
     User ops
     IdentityFile ~/.ssh/id_rsa
     RemoteForward 8888 127.0.0.1:7897
@@ -182,7 +182,7 @@ flannel-iface: eth0
 write-kubeconfig-mode: "0644"
 tls-san:
   - 192.168.1.228
-  - 116.62.168.245      # EIP，供外部 kubectl 访问
+  - <集群公网入口IP>      # EIP，供外部 kubectl 访问
 cluster-init: true       # 初始化新集群
 
 # 加入节点 (node-02/03)
@@ -307,7 +307,7 @@ ssh -fN k3s-node-01-proxy
 # /etc/systemd/system/k3s.service.env
 HTTP_PROXY=http://127.0.0.1:8888
 HTTPS_PROXY=http://127.0.0.1:8888
-NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.daocloud.io,.aliyuncs.com,.svc,.cluster.local,116.62.168.245,192.168.1.228,192.168.1.229,192.168.1.230
+NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.daocloud.io,.aliyuncs.com,.svc,.cluster.local,<集群公网入口IP>,192.168.1.228,192.168.1.229,192.168.1.230
 ```
 
 > `NO_PROXY` 排除 daocloud（主源直连不走代理），内网和集群 IP。只有 fallback 到 `registry-1.docker.io` 时才走代理。

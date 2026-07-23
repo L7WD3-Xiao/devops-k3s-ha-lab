@@ -16,7 +16,7 @@
 #
 # 配置：SSH config 中需有以下 Host（本机:7897 -> node-01:8888）
 #   Host k3s-node-01-proxy
-#       HostName 116.62.168.245
+#       HostName <node-01实际公网IP>
 #       User ops
 #       IdentityFile ~/.ssh/id_rsa
 #       RemoteForward 8888 127.0.0.1:7897

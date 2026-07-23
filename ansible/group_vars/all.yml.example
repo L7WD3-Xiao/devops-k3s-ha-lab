@@ -66,7 +66,7 @@ k3s_config_dir: /etc/rancher/k3s
 k3s_data_dir: /var/lib/rancher/k3s
 
 # External EIP on node-01 (for kubectl access from outside VPC)
-k3s_external_ip: 116.62.168.245
+k3s_external_ip: <集群公网入口IP>
 
 # ── MySQL Configuration ──────────────────────────────────────
 mysql_version: "8.0.46"

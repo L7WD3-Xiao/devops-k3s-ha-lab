@@ -185,7 +185,7 @@ secrets **不**纳入 GitOps（secret.yaml 继续 gitignore）：
 flux get all -A
 
 # 2. 端到端测试：修改 app/main.go → git push → 等待
-curl http://116.62.168.245/health
+curl http://<集群公网入口IP>/health
 
 # 3. 漂移纠正
 kubectl -n app-layer scale deployment shortlink --replicas=5

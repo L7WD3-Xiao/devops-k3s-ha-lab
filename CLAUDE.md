@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 K3s HA cluster (3-node, all control-plane+etcd) on Alibaba Cloud, with FluxCD GitOps + GitHub Actions CI/CD. Runs a Go short-link service backed by MySQL (via ProxySQL) and Redis (via Sentinel).
 
-**Cluster endpoint**: `http://116.62.168.245/health`
+**Cluster endpoint**: `http://<集群公网入口IP>/health`
 **SSH tunnel**: Local port 7897 → node-01:8888 (managed by `scripts/autossh-tunnel.sh`)
 
 ## Key Architecture
