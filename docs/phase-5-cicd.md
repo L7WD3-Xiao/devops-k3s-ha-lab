@@ -24,24 +24,6 @@ k8s/data-layer/kustomization.yaml          # Kustomize base template
 k8s/app-layer/kustomization.yaml           # Kustomize base + image marker
 ```
 
-### 🔧 关键架构决策
-
-**废弃 ImageUpdateAutomation，改由 CI 直接更新 tag**
-
-FluxCD v2.9.2 的 Setters 策略存在 bug：无论 `images.name` 使用完整域名还是短格式，都会将完整镜像引用（`domain/ns/repo:tag`）写入 `newTag`，而不是只写 tag 部分。这导致 Kustomize 渲染出 `domain:domain:tag` 的损坏镜像。
-
-**解决方案**：在 GitHub Actions CI workflow 中添加 `Update Kustomization tag` 步骤，每次构建后直接更新 `k8s/app-layer/kustomization.yaml` 的 `newTag` 行并 push。FluxCD SourceController 检测到新 commit 后自动同步部署。
-
-```
-git push → CI build + push ACR → CI update kustomization → CI push commit
-                                                                    ↓
-                                          FluxCD KustomizeController ← SourceController
-                                                                    ↓
-                                                            滚动更新完成
-```
-
----
-
 ## 核心组件
 
 ### K3s 集群侧
@@ -135,6 +117,30 @@ KustomizeController
 
 **命名说明**：当前 ImageRepository 和 kustomization.yaml 均使用 **VPC** 域名（node-01 在 VPC 内，可直接访问 VPC ACR）。GitHub Actions 推送镜像到公网 ACR，两个域名指向同一镜像仓库。如需回退到公网域名方案，只需改 ImageRepository 的 `image` 字段并更新 `acr-credentials`。
 
+> **ImageUpdateAutomation** 流程因 Bug 弃用，参见下方 tag 策略
+
+## 镜像 tag 策略
+
+- CI tag 格式：`v1.0.{github.run_number}`（semver）
+- FluxCD ImagePolicy：`semver: ">=1.0.0"`（自动选最高版本）
+- 同时推送 `latest` tag（方便手动调试）
+
+### 🔧 关键架构决策
+
+**废弃 ImageUpdateAutomation，改由 CI 直接更新 tag**
+
+FluxCD v2.9.2 的 Setters 策略存在 bug：无论 `images.name` 使用完整域名还是短格式，都会将完整镜像引用（`domain/ns/repo:tag`）写入 `newTag`，而不是只写 tag 部分。这导致 Kustomize 渲染出 `domain:domain:tag` 的损坏镜像。
+
+**解决方案**：在 GitHub Actions CI workflow 中添加 `Update Kustomization tag` 步骤，每次构建后直接更新 `k8s/app-layer/kustomization.yaml` 的 `newTag` 行并 push。FluxCD SourceController 检测到新 commit 后自动同步部署。
+
+```
+git push → CI build + push ACR → CI update kustomization → CI push commit
+                                                                    ↓
+                                          FluxCD KustomizeController ← SourceController
+                                                                    ↓
+                                                            滚动更新完成
+```
+
 ## CI/CD 流程
 
 ```
@@ -146,21 +152,12 @@ go vet → go test → docker build → push ACR (v1.0.N)
     ▼ (FluxCD, <5min)
 ImageReflector 发现 v1.0.N → ImagePolicy 选择最新
     │
-    ▼ (FluxCD)
-ImageUpdateAutomation: commit newTag → k8s/app-layer/kustomization.yaml
-    │
     ▼ (FluxCD, <1min)
 SourceController 检测新 commit → KustomizeController 滚动更新
     │
     ▼
 Traefik → shortlink:8080 (新版本)
 ```
-
-## 镜像 tag 策略
-
-- CI tag 格式：`v1.0.{github.run_number}`（semver）
-- FluxCD ImagePolicy：`semver: ">=1.0.0"`（自动选最高版本）
-- 同时推送 `latest` tag（方便手动调试）
 
 ## Secrets 管理
 

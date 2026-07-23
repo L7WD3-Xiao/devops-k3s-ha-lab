@@ -168,7 +168,7 @@
 | 数据库 | MySQL 8.0 (物理机) + Orchestrator + ProxySQL | 物理机 HA 标准方案 |
 | 缓存 | Redis 7 + Sentinel (StatefulSet) | 容器化 HA 标准方案 |
 | CI | GitHub Actions (lint -> test -> build -> push) | 免费额度够用，业界主流 |
-| CD | ArgoCD (GitOps) | 声明式部署，配置即代码 |
+| CD | FluxCD (GitOps) | 声明式部署，配置即代码 |
 | 镜像 | Docker 多阶段构建 + Harbor 私有仓库 | 镜像优化 + 私有化管理 |
 | IaC | Ansible Playbook | 批量配置、一键部署 |
 | 包管理 | Helm Chart + Kustomize | 应用打包 + 环境 overlay |
@@ -228,7 +228,7 @@ CREATE TABLE url_mapping (
 
 ### 6.2 技术栈（简历直接可用）
 
-> K3s / Ansible / Helm / ArgoCD / GitHub Actions / Redis Sentinel / MySQL 主从 / Orchestrator / ProxySQL / Harbor / Velero / Trivy / Go
+> K3s / Ansible / Helm / FluxCD/ GitHub Actions / Redis Sentinel / MySQL 主从 / Orchestrator / ProxySQL / ACR / Velero / Trivy / Go
 
 ### 6.3 项目职责
 
