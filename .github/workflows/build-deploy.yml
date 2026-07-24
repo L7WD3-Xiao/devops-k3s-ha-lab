@@ -54,9 +54,30 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: app/go.sum
 
+      # go mod tidy regenerates go.sum (CI has no Go locally, so it's done here)
+      - name: Go mod tidy
+        working-directory: app
+        run: |
+          go mod tidy
+          if [ -f go.sum ]; then
+            echo "go.sum regenerated"
+          fi
+
       - name: Go vet
         working-directory: app
         run: go vet ./...
+
+      # Commit updated go.sum (if go.mod changed)
+      - name: Commit go.sum
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/go.sum
+          git diff --cached --quiet || {
+            git commit -m "[ci] update go.sum for Go 1.26"
+            git push
+            echo "✅ go.sum committed and pushed"
+          }
 
       - name: Go test
         working-directory: app
@@ -152,7 +173,7 @@ jobs:
           # Commit and push
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$FILE"
+          git add "$FILE" app/go.sum
           git diff --cached --quiet || {
             git commit -m "[ci] update shortlink-app image to ${TAG}"
             git push
