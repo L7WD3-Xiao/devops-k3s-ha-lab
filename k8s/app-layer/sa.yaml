@@ -1,0 +1,28 @@
+---
+# ServiceAccounts for app-layer
+#   shortlink-app: app workload SA (minimal permissions)
+#   developer:     demo SA for "developer" role tier (CRUD within namespace)
+#   viewer:        demo SA for "readonly" role tier
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shortlink-app
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: developer
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: viewer
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster

@@ -45,6 +45,7 @@ spec:
       labels:
         app: shortlink
     spec:
+      serviceAccountName: shortlink-app
       # Prefer spreading pods across nodes (soft constraint)
       affinity:
         podAntiAffinity:
@@ -59,6 +60,16 @@ spec:
         - name: shortlink
           image: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8080
               name: http

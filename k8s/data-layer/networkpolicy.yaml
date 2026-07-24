@@ -1,0 +1,249 @@
+---
+# NetworkPolicy — data-layer whitelist isolation
+#
+# Strategy: default deny all ingress + egress, then allow each required flow.
+# All policies must be applied together to avoid mid-apply traffic interruption.
+#
+# Traffic matrix (see docs/phase-6-security-hardening.md §6.1):
+#   - Sentinel → Redis (6379) monitoring
+#   - Sentinel ↔ Sentinel (26379) quorum
+#   - Redis ↔ Redis (6379) replication
+#   - app-layer/shortlink → proxysql (6033), sentinel (26379), redis (6379)
+#   - proxysql/orchestrator → external MySQL (192.168.1.0/24 :3306)
+#   - orchestrator → proxysql (6032) admin
+#   - Traefik → orchestrator (3000) Web UI
+#   - All pods → coredns (53) DNS
+---
+# Default deny all ingress + egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ingress from app-layer (shortlink → proxysql, sentinel, redis)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-app-layer
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-layer
+      ports:
+        - port: 6033    # ProxySQL
+          protocol: TCP
+        - port: 26379   # Sentinel
+          protocol: TCP
+        - port: 6379    # Redis
+          protocol: TCP
+---
+# Allow Redis internal communication (Sentinel → Redis monitoring, Redis ↔ Redis replication)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-internal
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    # Sentinel → Redis monitoring
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sentinel
+      ports:
+        - port: 6379
+          protocol: TCP
+    # Redis → Redis replication
+    - from:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+          protocol: TCP
+---
+# Allow Sentinel ↔ Sentinel quorum communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sentinel-internal
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app: sentinel
+  policyTypes:
+    - Ingress
+  ingress:
+    # Sentinel ↔ Sentinel quorum
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sentinel
+      ports:
+        - port: 26379
+          protocol: TCP
+    # app-layer → Sentinel service discovery
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-layer
+      ports:
+        - port: 26379
+          protocol: TCP
+---
+# Allow orchestrator → proxysql admin (6032) for failover recovery
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orchestrator-to-proxysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  podSelector:
+    matchLabels:
+      app: proxysql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orchestrator
+      ports:
+        - port: 6032
+          protocol: TCP
+---
+# Allow DNS egress (UDP and TCP port 53 to coredns)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# Allow proxysql + orchestrator egress to external MySQL (VPC subnet + Pod CIDR)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-mysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  podSelector:
+    matchLabels:
+      app: proxysql
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+        - ipBlock:
+            cidr: 10.43.0.0/16    # K3s Pod CIDR (Service ClusterIP fallback)
+      ports:
+        - port: 3306
+          protocol: TCP
+---
+# Allow orchestrator egress to external MySQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orchestrator-to-mysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+        - ipBlock:
+            cidr: 10.43.0.0/16
+      ports:
+        - port: 3306
+          protocol: TCP
+    # orchestrator → proxysql admin port for failover recovery
+    - to:
+        - podSelector:
+            matchLabels:
+              app: proxysql
+      ports:
+        - port: 6032
+          protocol: TCP
+---
+# Allow Traefik → orchestrator Web UI (optional, port 3000)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-orchestrator
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - port: 3000
+          protocol: TCP

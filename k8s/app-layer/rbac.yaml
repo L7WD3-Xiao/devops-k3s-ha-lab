@@ -1,0 +1,116 @@
+---
+# RBAC — three-tier role model for app-layer
+#   admin:     K3s cluster-admin (k3s.yaml certificate)
+#   developer: SA developer → Role app-developer (CRUD within namespace)
+#   viewer:    SA viewer    → Role app-viewer    (readonly within namespace)
+#
+# Workload SA (shortlink-app) gets view ClusterRole binding for audit visibility.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-developer
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+rules:
+  # Core resources — CRUD
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec", "services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Workloads — CRUD
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Networking — CRUD
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Autoscaling — CRUD
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Policy — CRUD
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-viewer
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+rules:
+  # Core resources — read-only
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+  # Workloads — read-only
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Networking — read-only
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  # Autoscaling — read-only
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  # Policy — read-only
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+---
+# Binding: developer SA → app-developer Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-binding
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+subjects:
+  - kind: ServiceAccount
+    name: developer
+    namespace: app-layer
+roleRef:
+  kind: Role
+  name: app-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Binding: viewer SA → app-viewer Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: viewer-binding
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+subjects:
+  - kind: ServiceAccount
+    name: viewer
+    namespace: app-layer
+roleRef:
+  kind: Role
+  name: app-viewer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Binding: shortlink-app SA → view ClusterRole (audit visibility, minimal read-only)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shortlink-app-binding
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+subjects:
+  - kind: ServiceAccount
+    name: shortlink-app
+    namespace: app-layer
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io

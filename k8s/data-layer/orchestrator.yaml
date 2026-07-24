@@ -63,7 +63,7 @@ data:
         "ProxySQLHost": "proxysql",
         "ProxySQLPort": 6032,
         "ProxySQLUser": "admin",
-        "ProxySQLPassword": "admin",
+        "ProxySQLPassword": "__PROXYSQL_ADMIN_PASSWORD__",
         "WriterHostgroupID": 1,
         "ReaderHostgroupID": 2
       },
@@ -104,18 +104,31 @@ spec:
       labels:
         app: orchestrator
     spec:
+      serviceAccountName: orchestrator
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
       nodeSelector:
         kubernetes.io/hostname: node-01
       initContainers:
         - name: render-config
           image: openarkcode/orchestrator:latest
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
           command:
             - sh
             - -c
             - |
               sed \
                 -e "s|__ORCHESTRATOR_PASSWORD__|${ORCHESTRATOR_PASSWORD}|g" \
+                -e "s|__PROXYSQL_ADMIN_PASSWORD__|${PROXYSQL_ADMIN_PASSWORD}|g" \
                 /template/orchestrator.conf.json.template > /rendered/orchestrator.conf.json
               echo "[init] orchestrator.conf.json rendered successfully"
           env:
@@ -124,6 +137,11 @@ spec:
                 secretKeyRef:
                   name: mysql-credentials
                   key: orchestrator-password
+            - name: PROXYSQL_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: proxysql-admin-password
           volumeMounts:
             - name: config-template
               mountPath: /template
@@ -133,6 +151,12 @@ spec:
         - name: orchestrator
           image: openarkcode/orchestrator:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["/usr/local/orchestrator/orchestrator"]
           args: ["-c", "/etc/orchestrator.conf.json", "http"]
           ports:

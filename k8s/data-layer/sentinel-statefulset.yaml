@@ -49,6 +49,9 @@ spec:
       labels:
         app: sentinel
     spec:
+      serviceAccountName: redis
+      securityContext:
+        fsGroup: 999
       # Spread Sentinel pods across different nodes
       affinity:
         podAntiAffinity:
@@ -60,6 +63,13 @@ spec:
       initContainers:
         - name: init-sentinel
           image: redis:7-alpine
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
           command:
             - /bin/sh
             - -c
@@ -95,6 +105,15 @@ spec:
       containers:
         - name: sentinel
           image: redis:7-alpine
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["redis-server", "/sentinel-data/sentinel.conf", "--sentinel"]
           ports:
             - containerPort: 26379

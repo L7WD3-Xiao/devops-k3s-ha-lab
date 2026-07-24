@@ -6,3 +6,46 @@ metadata:
   name: data-layer
   labels:
     app.kubernetes.io/part-of: shortlink-cluster
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ResourceQuota for data-layer
+# Upper bound — actual usage far below these limits.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: data-layer-quota
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "3"
+    requests.memory: 2Gi
+    limits.cpu: "6"
+    limits.memory: 4Gi
+    persistentvolumeclaims: "6"
+---
+# LimitRange for data-layer
+# Sets default resource requests/limits for containers without explicit values.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: data-layer-limits
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 200m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: "1"
+        memory: 512Mi

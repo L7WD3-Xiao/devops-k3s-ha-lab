@@ -9,6 +9,9 @@ namespace: data-layer
 
 resources:
   - namespace.yaml
+  - sa.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
   - redis-configmap.yaml
   - redis-statefulset.yaml
   - sentinel-statefulset.yaml

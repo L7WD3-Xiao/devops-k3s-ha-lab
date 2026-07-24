@@ -59,4 +59,6 @@
 
 ## 下一步
 
-- Phase 5：CI/CD (FluxCD GitOps)
+- Phase 5：CI/CD (FluxCD GitOps) ✅ 已完成
+- Phase 6：安全加固 ✅ 已完成 (RBAC + NetworkPolicy + PSS + SecurityContext + Trivy + ProxySQL 密码迁移)
+- Phase 7：备份容灾（Velero + xtrabackup）

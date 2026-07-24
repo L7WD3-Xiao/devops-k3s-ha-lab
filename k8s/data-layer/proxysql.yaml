@@ -25,7 +25,7 @@ data:
 
     admin_variables=
     {
-      admin_credentials="admin:admin;radmin:radmin"
+      admin_credentials="admin:__PROXYSQL_ADMIN_PASSWORD__;radmin:__PROXYSQL_RADMIN_PASSWORD__"
       mysql_ifaces="0.0.0.0:6032"
       stats_credentials="stats:stats"
       refresh_interval=2000
@@ -108,11 +108,23 @@ spec:
       labels:
         app: proxysql
     spec:
+      serviceAccountName: proxysql
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
       nodeSelector:
         kubernetes.io/hostname: node-01
       initContainers:
         - name: render-config
           image: proxysql/proxysql:2.7.2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
           command:
             - sh
             - -c
@@ -120,6 +132,8 @@ spec:
               sed \
                 -e "s|__MONITOR_PASSWORD__|${MONITOR_PASSWORD}|g" \
                 -e "s|__SHORTLINK_PASSWORD__|${SHORTLINK_PASSWORD}|g" \
+                -e "s|__PROXYSQL_ADMIN_PASSWORD__|${PROXYSQL_ADMIN_PASSWORD}|g" \
+                -e "s|__PROXYSQL_RADMIN_PASSWORD__|${PROXYSQL_RADMIN_PASSWORD}|g" \
                 /template/proxysql.cnf.template > /rendered/proxysql.cnf
               echo "[init] proxysql.cnf rendered successfully"
           env:
@@ -133,6 +147,16 @@ spec:
                 secretKeyRef:
                   name: mysql-credentials
                   key: shortlink-password
+            - name: PROXYSQL_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: proxysql-admin-password
+            - name: PROXYSQL_RADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-credentials
+                  key: proxysql-radmin-password
           volumeMounts:
             - name: config-template
               mountPath: /template
@@ -141,6 +165,12 @@ spec:
       containers:
         - name: proxysql
           image: proxysql/proxysql:2.7.2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 6033
               name: mysql-proxy

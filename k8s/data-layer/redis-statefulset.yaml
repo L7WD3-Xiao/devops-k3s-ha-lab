@@ -49,6 +49,7 @@ spec:
       labels:
         app: redis
     spec:
+      serviceAccountName: redis
       # Spread Redis pods across different nodes
       affinity:
         podAntiAffinity:
@@ -57,9 +58,20 @@ spec:
                 matchLabels:
                   app: redis
               topologyKey: kubernetes.io/hostname
+      securityContext:
+        fsGroup: 999
       containers:
         - name: redis
           image: redis:7-alpine
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["/bin/sh", "/etc/redis/start-redis.sh"]
           ports:
             - containerPort: 6379

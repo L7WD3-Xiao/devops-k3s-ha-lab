@@ -10,6 +10,9 @@ kind: Kustomization
 namespace: app-layer
 resources:
   - namespace.yaml
+  - sa.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
   - configmap.yaml
   - shortlink.yaml
   - ingress.yaml

@@ -6,3 +6,45 @@ metadata:
   name: app-layer
   labels:
     app.kubernetes.io/part-of: shortlink-cluster
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# ResourceQuota for app-layer
+# Caps total resource consumption to prevent runaway workloads.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: app-layer-quota
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  hard:
+    pods: "10"
+    requests.cpu: "2"
+    requests.memory: 1Gi
+    limits.cpu: "4"
+    limits.memory: 2Gi
+---
+# LimitRange for app-layer
+# Sets default resource requests/limits for containers without explicit values.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: app-layer-limits
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 200m
+        memory: 128Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 64Mi
+      max:
+        cpu: "1"
+        memory: 512Mi

@@ -1,0 +1,56 @@
+---
+# RBAC — data-layer workload ServiceAccount bindings
+# All workload SAs bind to the built-in "view" ClusterRole for audit visibility.
+# These SAs do not call the K8s API; the binding is purely for least-privilege
+# audit logging (minimal read-only access).
+---
+# Binding: redis SA → view ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redis-binding
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+subjects:
+  - kind: ServiceAccount
+    name: redis
+    namespace: data-layer
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+# Binding: proxysql SA → view ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxysql-binding
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+subjects:
+  - kind: ServiceAccount
+    name: proxysql
+    namespace: data-layer
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+# Binding: orchestrator SA → view ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-binding
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator
+    namespace: data-layer
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io

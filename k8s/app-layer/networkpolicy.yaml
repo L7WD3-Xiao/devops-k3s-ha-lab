@@ -1,0 +1,124 @@
+---
+# NetworkPolicy — app-layer whitelist isolation
+#
+# Strategy: default deny all ingress, then allow specific sources.
+# Egress is open (default allow) — only DNS is explicitly allowed as
+# a safety measure, but applications can reach data-layer services
+# because data-layer's NetworkPolicy allows from app-layer.
+#
+# Deploy deny-all and allow-* together to avoid mid-apply traffic interruption.
+---
+# Default deny all ingress into app-layer
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Allow ingress from Traefik (kube-system namespace, hostNetwork)
+# Traefik pods carry label app.kubernetes.io/name: traefik in kube-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-traefik
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector:
+    matchLabels:
+      app: shortlink
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# Allow DNS egress (UDP and TCP port 53 to coredns in kube-system)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# Allow egress to data-layer services (ProxySQL + Redis + Sentinel)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-data-layer
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  podSelector:
+    matchLabels:
+      app: shortlink
+  policyTypes:
+    - Egress
+  egress:
+    # ProxySQL — MySQL read/write proxy
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data-layer
+          podSelector:
+            matchLabels:
+              app: proxysql
+      ports:
+        - port: 6033
+          protocol: TCP
+    # Redis Sentinel — service discovery
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data-layer
+          podSelector:
+            matchLabels:
+              app: sentinel
+      ports:
+        - port: 26379
+          protocol: TCP
+    # Redis — direct access after Sentinel resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data-layer
+          podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+          protocol: TCP

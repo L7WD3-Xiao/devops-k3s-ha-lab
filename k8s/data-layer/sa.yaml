@@ -1,0 +1,25 @@
+---
+# ServiceAccounts for data-layer workloads
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redis
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: redis-sentinel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxysql
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: data-layer
+  labels:
+    app.kubernetes.io/part-of: mysql-ha

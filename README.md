@@ -138,7 +138,10 @@ git push (app/ 或 Dockerfile 变更)
 ├── k8s/
 │   ├── data-layer/              # Redis、Sentinel、ProxySQL、Orchestrator
 │   │   ├── kustomization.yaml
-│   │   ├── namespace.yaml
+│   │   ├── namespace.yaml        # PSS labels + ResourceQuota + LimitRange
+│   │   ├── sa.yaml               # ServiceAccounts (redis, proxysql, orchestrator)
+│   │   ├── rbac.yaml             # RoleBindings → view ClusterRole
+│   │   ├── networkpolicy.yaml    # 白名单隔离 (9 policies)
 │   │   ├── redis-configmap.yaml
 │   │   ├── redis-statefulset.yaml
 │   │   ├── sentinel-statefulset.yaml
@@ -146,7 +149,10 @@ git push (app/ 或 Dockerfile 变更)
 │   │   └── proxysql.yaml
 │   └── app-layer/               # Shortlink 应用层
 │       ├── kustomization.yaml   # 镜像 tag 由 CI 自动更新
-│       ├── namespace.yaml
+│       ├── namespace.yaml        # PSS labels + ResourceQuota + LimitRange
+│       ├── sa.yaml               # ServiceAccounts (shortlink-app, developer, viewer)
+│       ├── rbac.yaml             # Roles (app-developer, app-viewer) + RoleBindings
+│       ├── networkpolicy.yaml    # 白名单隔离 (4 policies)
 │       ├── configmap.yaml
 │       ├── shortlink.yaml       # Deployment + Service
 │       ├── ingress.yaml         # Traefik Ingress
@@ -212,7 +218,7 @@ git push (app/ 或 Dockerfile 变更)
 | **Phase 3** 🗄️ | 数据层部署 | MySQL 物理机主从 + Orchestrator + ProxySQL + Redis Sentinel |
 | **Phase 4** 🚀 | 应用部署 | 短链服务 Go + Gin、多阶段构建、Traefik Ingress + ACR |
 | **Phase 5** 🔄 | CI/CD 流水线 | GitHub Actions + FluxCD GitOps（已实现 ✅） |
-| **Phase 6** 🔒 | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描 |
+| **Phase 6** 🔒 | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描（已完成 ✅） |
 | **Phase 7** 💾 | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
 | **Phase 8** 📖 | 文档整理 | 架构文档、部署手册、简历产出物整理 |
 
@@ -288,6 +294,11 @@ curl -X POST http://<公网IP>/api/shorten \
 | ✅ GitOps 声明式部署 | 集群与 Git 永久一致，漂移自动纠正 |
 | ✅ CI/CD 自动化 | git push → 自动构建 → 自动部署 |
 | ✅ 滚动更新 + 优雅关闭 | 零宕机更新 |
+| ✅ RBAC 三层权限 | admin / developer (CRUD) / viewer (只读) |
+| ✅ NetworkPolicy 白名单 | 12 条流量规则，default deny + allow list |
+| ✅ SecurityContext + PSS | app-layer=restricted, data-layer=baseline |
+| ✅ Trivy CI 扫描 | HIGH/CRITICAL 阻断部署，SARIF 上传 |
+| ✅ ResourceQuota | namespace 资源总量限制 + LimitRange 默认值 |
 
 ---
 
@@ -297,7 +308,7 @@ curl -X POST http://<公网IP>/api/shorten \
 
 | 阶段 | 内容 | 关键产出 |
 |------|------|---------|
-| **Phase 6** 🔒 | 安全加固 | RBAC 权限分级（admin/developer/readonly）、NetworkPolicy Pod 网络隔离、Trivy CI 镜像漏洞扫描 |
+| **Phase 6** 🔒 | 安全加固（已完成 ✅） | RBAC 分层权限 + NetworkPolicy 白名单隔离 + PSS + SecurityContext + ResourceQuota + Trivy 镜像扫描 + ProxySQL 密码迁移 |
 | **Phase 7** 💾 | 备份容灾 | Velero 集群资源备份（含 PV 快照）、MySQL xtrabackup 异地备份、定期恢复演练 |
 | **Phase 8** 📖 | 文档整理 | 架构文档化、部署手册、简历产出物整理 |
 
