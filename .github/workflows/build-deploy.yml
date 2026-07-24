@@ -104,7 +104,7 @@ jobs:
 
       # ── Trivy image scan (fail on HIGH/CRITICAL) ───────────
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.meta.outputs.full }}
           format: 'table'
@@ -118,7 +118,7 @@ jobs:
       # ── Trivy SARIF (always runs, for GitHub Code Scanning) ─
       - name: Trivy scan (SARIF)
         if: always()
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.meta.outputs.full }}
           format: 'sarif'
