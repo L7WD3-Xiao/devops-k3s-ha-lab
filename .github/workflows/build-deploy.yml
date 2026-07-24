@@ -35,8 +35,6 @@ env:
 # Needed to push the tag update commit back to the repo
 permissions:
   contents: write
-  security-events: write
-  actions: read
 
 jobs:
   build-and-update:
@@ -137,24 +135,6 @@ jobs:
           severity: 'HIGH,CRITICAL'
         env:
           TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db,public.ecr.aws/aquasecurity/trivy-db
-
-      # ── Trivy SARIF (always runs, for GitHub Code Scanning) ─
-      - name: Trivy scan (SARIF)
-        if: always()
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ steps.meta.outputs.full }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          ignore-unfixed: true
-          severity: 'HIGH,CRITICAL'
-
-      - name: Upload Trivy SARIF results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-results.sarif'
-          category: trivy
 
       # ── Update Kustomization tag (replaces IUA) ───────────
       # Directly updates the newTag line in kustomization.yaml so
