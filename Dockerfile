@@ -1,5 +1,6 @@
 # ── Build stage ─────────────────────────────────────────────
-# Multi-stage build: compile Go binary in golang image, run in alpine
+# Multi-stage build: compile Go binary in golang image, run in scratch.
+# The binary is statically linked (CGO_ENABLED=0) — no libc needed.
 #
 # Build context: project root (docker build -f Dockerfile .)
 # Go source code lives in app/
@@ -9,10 +10,10 @@
 #             CI passes this; local builds default to "dev"
 #
 # NOTE: On node-01 (no Docker Hub access), build with daocloud mirror URLs:
-#   docker.m.daocloud.io/library/golang:1.22-alpine
-#   docker.m.daocloud.io/library/alpine:3.20
+#   docker.m.daocloud.io/library/golang:1.23-alpine
+#   docker.m.daocloud.io/library/alpine:3.21
 # The build-push.sh script handles this substitution automatically.
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 ARG VERSION=dev
 
@@ -31,19 +32,24 @@ RUN go mod tidy && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-s -w -X main.AppVersion=${VERSION}" \
     -o shortlink .
 
-# ── Runtime stage ───────────────────────────────────────────
-# alpine provides ca-certificates (needed for HTTPS redirects) + tzdata
-FROM alpine:3.20
-
+# ── Certs stage — extract ca-certificates + tzdata for scratch ─
+FROM alpine:3.21 AS certs
 RUN apk --no-cache add ca-certificates tzdata
 
-WORKDIR /app
-COPY --from=builder /build/shortlink .
+# ── Runtime stage ───────────────────────────────────────────
+# scratch = zero OS packages, zero CVEs.
+# Go pure-Go resolver works in K8s (resolv.conf is auto-mounted).
+FROM scratch
+
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=certs /usr/share/zoneinfo /usr/share/zoneinfo/
+COPY --from=builder /build/shortlink /app/shortlink
+
+ENV TZ=Asia/Shanghai
 
 EXPOSE 8080
 
-# Non-root user for security
-RUN adduser -D -u 10001 appuser
-USER appuser
+# Non-root user (K8s SecurityContext runAsUser must match)
+USER 10001
 
-CMD ["./shortlink"]
+CMD ["/app/shortlink"]

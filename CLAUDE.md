@@ -20,6 +20,7 @@ git push (app/** or Dockerfile changed)
     ├── go vet + go test
     ├── docker build (ldflags injects VERSION into binary)
     ├── docker push → ACR public domain (v1.0.{run_number})
+    ├── Trivy image scan (HIGH/CRITICAL → block, SARIF → Code Scanning)
     ├── sed update k8s/app-layer/kustomization.yaml newTag
     └── git commit + push
     │
@@ -85,6 +86,10 @@ Secrets are NOT in Git — they are created manually on the cluster:
 
 5. **SSH git remote** instead of HTTPS+PAT — PAT without `workflow` scope cannot push `.github/workflows/*` changes.
 
+6. **PSS levels differ by namespace** — `app-layer` enforces `restricted` (shortlink runs as non-root UID 10001). `data-layer` enforces `baseline` only — ProxySQL and Orchestrator upstream images require root and neither project ships a non-root variant. `audit`/`warn` labels are set to `restricted` on data-layer to track gaps without breaking workloads.
+
+7. **Secret placeholder + init container pattern** — for config files that need passwords at runtime (ProxySQL, Orchestrator), the ConfigMap stores `__PLACEHOLDER__` tokens, never plaintext. An init container reads the real password from a Secret via `env.valueFrom.secretKeyRef` and fills it in with `sed`. This keeps secrets out of Git while leaving config templates version-controlled.
+
 ## Commands
 
 ### Tunnel Management (from Windows dev machine)
@@ -107,6 +112,18 @@ bash scripts/check-tunnel.sh              # Full health check
 ssh k3s-node-01
 ```
 
+### kubectl (no local install — use SSH)
+
+```bash
+# kubectl is NOT installed on the Windows dev machine.
+# All kubectl commands go through node-01 via SSH:
+ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get pods -A"
+ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl auth can-i get pods --as=developer -n app-layer"
+
+# For frequent use, alias in .bashrc:
+# alias k='ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl'
+```
+
 ### FluxCD
 
 ```bash
@@ -126,7 +143,7 @@ flux reconcile kustomization app-layer
 sudo PATH="/usr/local/bin:$PATH" nerdctl build \
   --build-arg VERSION=v1.0.N \
   -t crpi-xxx.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1.0.N .
-# Use daocloud mirror: docker.m.daocloud.io/library/golang:1.22-alpine
+# Use daocloud mirror: docker.m.daocloud.io/library/golang:1.23-alpine
 ```
 
 ### Go
@@ -146,3 +163,19 @@ The binary version is injected at build time via Docker `ARG VERSION` + `-ldflag
 - **Local**: defaults to `"dev"`
 - **health endpoint**: `/health` returns `{"status":"ok","version":"v1.0.N"}`
 - **Go requirement**: `var AppVersion` (not `const` — ldflags -X only works with vars)
+
+## Common Pitfalls
+
+### StatefulSet + SecurityContext file permission trap
+
+When an init container runs as **root** (default) and generates files for a main container that runs as **non-root** (SecurityContext `runAsUser`), the generated files inherit the init container's ownership and default umask (644 = no group write). Even with pod-level `fsGroup`, the file's group write bit must be set explicitly.
+
+**Symptom**: StatefulSet pods crash with `Permission denied` writing to a volume that `fsGroup` should have granted access to.
+
+**Fix**: Add `chmod g+w <file>` to the init container script after generating the file. See `k8s/data-layer/sentinel-statefulset.yaml:98`.
+
+### FluxCD reconciliation when pods are unhealthy
+
+FluxCD KustomizeController runs health checks before reconciling. If all pods of a resource are CrashLoopBackOff, the health check may fail and FluxCD won't reconcile — even if the StatefulSet/Deployment spec in Git has already been updated with the fix.
+
+**Workaround**: After pushing a fix commit, manually delete the failing pods. The StatefulSet controller re-creates them with the updated template (already synced by FluxCD to the cluster, just not rolled out to existing pods).
