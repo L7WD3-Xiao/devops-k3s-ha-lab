@@ -13,7 +13,7 @@
 #   docker.m.daocloud.io/library/golang:1.23-alpine
 #   docker.m.daocloud.io/library/alpine:3.21
 # The build-push.sh script handles this substitution automatically.
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 ARG VERSION=dev
 
