@@ -30,6 +30,12 @@
 
 set -uo pipefail
 
+# ==================== 解析自身绝对路径 ====================
+# nohup 后台重调用时需要绝对路径，避免相对路径找不到脚本
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT_NAME}"
+
 # ==================== 配置 ====================
 SSH_HOST="k3s-node-01-proxy"
 SSH_CLEANUP_HOST="k3s-node-01"           # 用于远端清理的 Host（不带 RemoteForward，避免端口冲突）
@@ -63,6 +69,51 @@ read_pid() {
 
 daemon_pid() { read_pid "$DAEMON_PID_FILE"; }
 ssh_pid()     { read_pid "$SSH_PID_FILE"; }
+
+# ==================== 本地端口检测 ====================
+
+# 从 SSH config 解析本地隧道监听端口（RemoteForward 第三个字段的最后一个 :xxxx 部分）
+# RemoteForward 8888 127.0.0.1:7897  → 7897
+read_local_port() {
+    local ssh_config="${HOME}/.ssh/config"
+    [ ! -f "$ssh_config" ] && return 1
+
+    awk -v host="$SSH_HOST" '
+        tolower($1) == "host" && tolower($2) == tolower(host) { in_block = 1; next }
+        in_block && /^[[:space:]]*$/ { in_block = 0; next }
+        in_block && tolower($1) == "host" && tolower($2) != tolower(host) { in_block = 0; next }
+        in_block && tolower($1) == "remoteforward" {
+            split($3, a, ":")
+            print a[length(a)]
+            exit
+        }
+    ' "$ssh_config"
+}
+
+# 检查指定端口是否已被本机进程监听
+is_port_listening() {
+    local port="$1"
+    [ -z "$port" ] && return 1
+
+    # Git Bash / MSYS2 / Windows：netstat
+    if command -v netstat &>/dev/null; then
+        netstat -an 2>/dev/null | grep -qiE "LISTENING.*[:.]${port}\b" && return 0
+    fi
+
+    # Linux：ss
+    if command -v ss &>/dev/null; then
+        ss -tln 2>/dev/null | grep -qE ":${port}\b" && return 0
+    fi
+
+    # Windows fallback：PowerShell
+    if command -v powershell.exe &>/dev/null; then
+        powershell.exe -NoProfile -Command \
+            "Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Out-Null; if (\$?) { exit 0 } else { exit 1 }" \
+            2>/dev/null && return 0
+    fi
+
+    return 1
+}
 
 # ==================== 远端端口清理 ====================
 # SSH 断开后，node-01 的 sshd 可能仍持有隧道端口，导致重连失败。
@@ -104,6 +155,15 @@ run_forever() {
         local exit_code=$?
         rm -f "$SSH_PID_FILE"
 
+        # 本机代理检测：代理已关闭则不再重试，避免无限循环
+        local local_port
+        local_port=$(read_local_port) || true
+        if [ -n "$local_port" ] && ! is_port_listening "$local_port"; then
+            log "Local proxy :${local_port} is gone — tunnel cannot continue, exiting"
+            log "=========================================="
+            exit 0
+        fi
+
         if [ $exit_code -eq 0 ]; then
             log "SSH tunnel exited normally (code=0)"
             fail_count=0
@@ -142,9 +202,25 @@ cmd_start() {
         echo "Daemon already running (PID $pid)"
         return 1
     fi
+
+    # 端口预检：先确保本机代理已启动，否则隧道 RemoteForward 连不上
+    local local_port
+    local_port=$(read_local_port) || true
+    if [ -n "$local_port" ]; then
+        if ! is_port_listening "$local_port"; then
+            echo "ERROR: Local proxy port :${local_port} is NOT listening"
+            echo "       The RemoteForward tunnel needs a local service on port ${local_port}"
+            echo "       Please start the local proxy first, then retry"
+            return 1
+        fi
+        echo "Port check: local :${local_port} is listening (proxy OK)"
+    else
+        echo "Port check: skipped (could not parse local port from SSH config)"
+    fi
+
     mkdir -p "$STATE_DIR"
     # nohup 后台运行本脚本的 _daemon 分支
-    nohup "$0" _daemon >>"$LOG_FILE" 2>&1 &
+    nohup "$SCRIPT_PATH" _daemon >>"$LOG_FILE" 2>&1 &
     local new_pid=$!
     echo "$new_pid" > "$DAEMON_PID_FILE"
     sleep 2  # 等待 ssh 建立
@@ -193,6 +269,18 @@ cmd_status() {
     else
         echo "SSH:     INACTIVE"
     fi
+
+    # 本机代理端口状态（隧道的前提条件）
+    local local_port
+    local_port=$(read_local_port) || true
+    if [ -n "$local_port" ]; then
+        if is_port_listening "$local_port"; then
+            echo "Proxy:   :${local_port} — LISTENING"
+        else
+            echo "Proxy:   :${local_port} — NOT LISTENING (tunnel cannot connect)"
+        fi
+    fi
+
     if [ -f "$LOG_FILE" ]; then
         echo ""
         echo "--- Recent log ---"
