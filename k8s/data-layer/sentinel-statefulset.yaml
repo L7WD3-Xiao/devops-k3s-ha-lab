@@ -95,6 +95,7 @@ spec:
               # Replace hostname with IP in sentinel.conf
               sed "s/redis-0.redis-headless.data-layer.svc.cluster.local/$MASTER_IP/g" \
                 /etc/redis-config/sentinel.conf > /sentinel-data/sentinel.conf
+              chmod g+w /sentinel-data/sentinel.conf
               echo "[Sentinel Init] sentinel.conf generated:"
               cat /sentinel-data/sentinel.conf
           volumeMounts:
