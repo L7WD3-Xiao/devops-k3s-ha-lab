@@ -38,11 +38,8 @@ spec:
           command: ["/velero"]
           args:
             - server
-            - --default-volumes-to-fs-backup=true
-            - --use-volume-snapshots=false
-            - --backup-location-config=region=cn-hangzhou,s3ForcePathStyle=true,s3Url=https://oss-cn-hangzhou-internal.aliyuncs.com
-            - --bucket=k3s-backup-velero
-            - --prefix=velero-backups
+            - --default-volumes-to-fs-backup
+            - --uploader-type=kopia
           env:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /credentials/cloud
