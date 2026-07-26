@@ -11,9 +11,6 @@ metadata:
 spec:
   schedule: "30 2 * * *"
   template:
-    metadata:
-      annotations:
-        velero.io/timezone: Asia/Shanghai
     includedNamespaces:
       - data-layer
       - app-layer
