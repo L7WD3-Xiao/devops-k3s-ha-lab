@@ -1,4 +1,4 @@
-# 基于 K3s 的高可用短链服务集群 — 项目需求规格与简历内容
+# 基于 K3s 的高可用短链服务集群 — 项目需求规格
 
 ## 一、项目概述
 
@@ -23,7 +23,7 @@
 
 ## 二、运维技能矩阵（需求分析与头脑风暴）
 
-### 2.1 原始需求拆解
+### 2.1 需求拆解
 
 | 原始需求 | 对应运维技能方向 | 为什么需要 |
 |---------|----------------|-----------|
@@ -34,27 +34,22 @@
 | 简单业务场景（短链） | 应用容器化、镜像构建 | 业务够简单即可，重点在基础设施 |
 | 学生友好硬件 | 资源规划、成本意识 | 校招项目不能要求万元服务器，要能落地 |
 | 生产级技术 / 架构 / 配置 | 工程规范、最佳实践 | 面试官会追问配置细节，不能玩具化 |
+| CI/CD 流水线 | GitHub Actions + ArgoCD GitOps | 校招运维岗核心考察点，没 CI/CD 等于没自动化 |
+| IaC 自动化部署 | Ansible Playbook | 展示"可复现部署"理念，不是手动 SSH 逐台配 |
+| 安全加固 | RBAC + NetworkPolicy + Trivy | 生产级安全要求，面试会问"集群安全怎么做" |
+| 备份容灾 | Velero + xtrabackup | 数据安全是底线，面试会问"数据丢了怎么办" |
+| Helm 包管理 | Helm Chart 编写 | K8s 生态标准工具，展示工程化能力 |
+| HPA 自动伸缩 | Horizontal Pod Autoscaler | 展示弹性伸缩能力 |
+| 镜像仓库 | 阿里云ACR | 生产环境不用 Docker Hub |
+| 配置管理 | ConfigMap + Secret + Kustomize | 环境隔离、配置分离是工程基本功 |
 
-### 2.2 补充需求分析（用户未提及但简历需要）
-
-| 补充需求 | 技能方向 | 为什么简历需要 |
-|---------|---------|---------------|
-| **CI/CD 流水线** | GitHub Actions + ArgoCD GitOps | 校招运维岗核心考察点，没 CI/CD 等于没自动化 |
-| **IaC 自动化部署** | Ansible Playbook | 展示"可复现部署"理念，不是手动 SSH 逐台配 |
-| **安全加固** | RBAC + NetworkPolicy + Trivy | 生产级安全要求，面试会问"集群安全怎么做" |
-| **备份容灾** | Velero + xtrabackup | 数据安全是底线，面试会问"数据丢了怎么办" |
-| **Helm 包管理** | Helm Chart 编写 | K8s 生态标准工具，展示工程化能力 |
-| **HPA 自动伸缩** | Horizontal Pod Autoscaler | 展示弹性伸缩能力 |
-| **镜像仓库** | Harbor 私有仓库 | 生产环境不用 Docker Hub，展示私有化能力 |
-| **配置管理** | ConfigMap + Secret + Kustomize | 环境隔离、配置分离是工程基本功 |
-
-### 2.3 技能优先级
+### 2.2 技能优先级
 
 | 优先级 | 技能模块 | 理由 |
 |-------|---------|------|
 | **P0 必须** | K3s 集群部署、Redis HA、MySQL HA、CI/CD、Helm | 核心考察点，缺一不可 |
 | **P1 推荐** | Ansible、RBAC / NetworkPolicy、Velero 备份 | 生产级必备，有了明显加分 |
-| **P2 亮点** | ArgoCD GitOps、HPA、Trivy 镜像扫描、Harbor | 展示深度和 DevSecOps 意识 |
+| **P2 亮点** | FluxCD GitOps、HPA、Trivy 镜像扫描、Harbor | 展示深度和 DevSecOps 意识 |
 
 ---
 
@@ -105,15 +100,15 @@
 │     + etcd       │    │     + etcd         │    │     + etcd         │
 ├──────────────────┤    ├────────────────────┤    ├────────────────────┤
 │ K3s server       │    │ K3s server         │    │ K3s server         │
-│ ArgoCD           │    │ URL App Pod        │    │ URL App Pod        │
-│ Harbor           │    │ Redis Master (容器) │    │ Redis Slave (容器)  │
+│ FluxCD           │    │ URL App Pod        │    │ URL App Pod        │
+│                  │    │ Redis Master (容器) │    │ Redis Slave (容器)  │
 │ Velero           │    │ Sentinel x1 (容器)  │    │ Sentinel x2 (容器)  │
 │ Orchestrator     │    │ MySQL Master (物理) │    │ MySQL Slave (物理)  │
-│   (容器)         │    │ ProxySQL (容器)     │    │ xtrabackup 备份    │
+│   (容器)          │    │ ProxySQL (容器)     │    │ xtrabackup 备份    │
 └──────────────────┘    └────────────────────┘    └────────────────────┘
          │                          │                          │
          │                ┌─────────▼──────────┐               │
-         └────────────────│   数据高可用层      │───────────────┘
+         └────────────────│    数据高可用层      │───────────────┘
                           ├────────────────────┤
                           │ Redis HA (容器化)   │  1主2从 + 3哨兵, 自动切换
                           │ MySQL HA (物理机)   │  主从复制 + Orchestrator
@@ -217,46 +212,7 @@ CREATE TABLE url_mapping (
 
 ---
 
-## 六、预期简历项目内容
-
-### 6.1 项目名称与描述
-
-**项目名称**：基于 K3s 的高可用短链服务集群设计与实现
-
-**项目描述**：
-设计并实现了一套面向生产环境的高可用 K3s 集群架构，承载短链跳转服务。涵盖集群部署、网络管理、数据高可用（Redis 容器化 + MySQL 物理机）、GitOps CI/CD、安全加固、备份容灾等基础设施全栈运维能力。
-
-### 6.2 技术栈（简历直接可用）
-
-> K3s / Ansible / Helm / FluxCD/ GitHub Actions / Redis Sentinel / MySQL 主从 / Orchestrator / ProxySQL / ACR / Velero / Trivy / Go
-
-### 6.3 项目职责
-
-1. **集群架构与自动化部署**：设计 3 节点 K3s HA 集群（Master + Worker + embedded etcd），使用 Ansible Playbook 实现一键自动化部署，编写 Inventory 管理节点角色，通过 Helm Chart 统一管理应用 manifests
-
-2. **Redis 容器化高可用**：使用 StatefulSet 部署 Redis Sentinel 集群（1 主 2 从 + 3 哨兵），实现自动故障检测与 Master 切换，配置 RDB + AOF 双持久化，PVC 挂载 local-path 存储保障数据安全
-
-3. **MySQL 物理机高可用**：在物理机部署 MySQL 主从复制（GTID 模式），Orchestrator 实现自动故障检测与主从切换，ProxySQL 容器化部署实现读写分离，xtrabackup 定时全量 + 增量备份支持 PITR
-
-4. **CI/CD 流水线**：搭建 GitHub Actions 构建流水线（代码检查 -> 多阶段镜像构建 -> 推送 Harbor 私有仓库），部署 ArgoCD 实现 GitOps 声明式发布，Git 仓库为唯一事实来源，支持版本回滚
-
-5. **安全加固**：配置 RBAC 权限分级（admin / developer / readonly 三种 Role），NetworkPolicy 实现 Pod 间网络隔离（仅允许 App 访问 Redis / MySQL），Trivy 集成 CI 流水线做镜像漏洞扫描，阻断高危镜像入库
-
-6. **弹性伸缩与调度**：配置 HPA 基于 CPU 使用率自动伸缩应用副本（2-6 副本），设置 PodDisruptionBudget 保障滚动更新最少可用副本数，配置 Liveness / Readiness Probe 实现自动故障恢复
-
-7. **备份容灾**：Velero 定期备份集群资源（含 PV 快照），MySQL xtrabackup 异地备份，编写 Ansible 恢复 Playbook，定期执行恢复演练验证备份有效性
-
-### 6.4 项目亮点
-
-- **Redis 容器化 HA 与 MySQL 物理机 HA 形成对比**，体现"哪些该容器化、哪些不该"的架构判断力——面试高频追问点
-- **全链路 IaC**：Ansible 部署集群 -> Helm 打包应用 -> ArgoCD 同步发布，环境可一键复现，消除"雪花服务器"
-- **GitOps 模式**：Git 仓库为唯一事实来源，所有变更可审计、可回滚，符合 GitOps 原则
-- **安全纵深**：RBAC 权限控制 + NetworkPolicy 网络隔离 + Trivy 镜像扫描，三层安全防线
-- **数据双备份**：Velero 集群资源备份 + xtrabackup 数据库备份，覆盖"集群级"和"数据级"两个维度
-
----
-
-## 七、后续实施路线
+## 六、后续实施路线
 
 | 阶段 | 内容 | 产出 |
 |------|------|------|

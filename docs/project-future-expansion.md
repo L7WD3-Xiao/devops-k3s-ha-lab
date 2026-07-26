@@ -1,0 +1,468 @@
+# 项目拓展方向规划（中厂 SRE 校招视角）
+
+> 本文档从**面试信号强度 × 校招生可操作性 × 中厂生产贴合度**三维评估坐标系出发，对项目后续拓展方向进行分级规划。每个方向附带面试 Q&A，已按实操程度区分回答口径。
+
+---
+
+## 评估框架
+
+| 维度 | 权重 | 含义 |
+|------|------|------|
+| 面试信号强度 | ★★★★★ | 面试官多大概率会追问、追问后能展示什么能力 |
+| 校招生可操作性 | ★★★★★ | 一台 2C2G 虚拟机能否实现、时间/预算/技术储备门槛 |
+| 中厂生产贴合度 | ★★★★★ | 中厂 SRE 实际工作中会不会遇到这个问题 |
+
+**回答口径说明：**
+
+| 可操作性评分 | 面试回答策略 | 文档标注 |
+|------------|-------------|---------|
+| ★★★★~★★★★★ | 按**已实施**回答，含配置细节、踩坑修复、验证数据 | ✅ 已做 |
+| ★★~★★★ | 按**了解流程但未落地**回答，含架构理解、实施规划、与当前方案的对比分析 | 📖 了解 |
+
+---
+
+## 目录
+
+1. [HTTPS + cert-manager（P0）](#1-https--cert-manager)
+2. [External Secrets Operator（P0）](#2-external-secrets-operator)
+3. [数据库自动巡检脚本（P1）](#3-数据库自动巡检脚本)
+4. [Kyverno 策略即代码（P1）](#4-kyverno-策略即代码)
+5. [Canary 灰度发布 Flagger（P1）](#5-canary-灰度发布-flagger)
+6. [Longhorn 分布式存储（P2）](#6-longhorn-分布式存储)
+7. [自定义指标 HPA（P2）](#7-自定义指标-hpa)
+8. [暂不推荐的方向](#8-暂不推荐的方向)
+
+---
+
+## ⭐ P0 — 优先投入
+
+### 1. HTTPS + cert-manager ✅ 已做
+
+#### 为什么是 P0
+
+当前集群使用 HTTP 暴露服务，面试官第一反应是"没有 HTTPS 的生产集群不算生产"。加上 HTTPS 后项目直接从"学生玩具"升级为"生产级别"，而且 cert-manager + Let's Encrypt 是全自动续签的，运维成本几乎为零。
+
+#### 实施思路
+
+| 组件 | 方案 |
+|------|------|
+| 证书管理 | cert-manager v1.16+（Helm 安装） |
+| 证书签发 | Let's Encrypt（免费，90 天有效期，自动续签） |
+| 验证方式 | HTTP-01（通过 Traefik Ingress 暴露 80 端口完成验证） |
+| 域名 | 申请一个廉价域名（约 20-30 元/年），解析 A 记录到集群 EIP |
+
+**实施步骤：**
+1. Helm 安装 cert-manager（注意先安装 CRD）
+2. 创建 ClusterIssuer（Let's Encrypt 生产环境 + 备用 staging 环境用于测试）
+3. 修改 Ingress，添加 TLS 配置 + cert-manager annotation
+4. 验证证书签发 + 自动续签
+
+**配置关键片段：**
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: traefik
+```
+
+Ingress annotation 修改：
+```yaml
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - shortlink.example.com
+      secretName: shortlink-tls
+```
+
+#### 面试 Q&A
+
+**Q：你们集群的 HTTPS 是怎么做的？**
+
+我们用 cert-manager + Let's Encrypt 做自动化证书管理。cert-manager 通过 Helm 安装，创建了一个 ClusterIssuer 指向 Let's Encrypt 的 ACME 服务器。在 Ingress 上添加 `cert-manager.io/cluster-issuer` annotation 后，cert-manager 自动向 Let's Encrypt 申请证书并注入到 Ingress。采用 HTTP-01 验证——因为我们的 Traefik Ingress 已经暴露了 80 端口，Let's Encrypt 可以通过公网访问验证服务器控制权。
+
+**Q：HTTP-01 和 DNS-01 有什么区别？为什么选 HTTP-01？**
+
+HTTP-01 通过在 `/.well-known/acme-challenge/` 放置 token 文件来验证域名所有权，要求 80 端口公网可达。DNS-01 通过配置 DNS TXT 记录验证，不需要公网 80 端口，而且可以签发通配符证书（`*.example.com`）。我们选 HTTP-01 是因为 Traefik 已经在监听 80 端口，不需要额外配置云厂商 DNS API，实现更简单。
+
+**Q：Let's Encrypt 证书只有 90 天有效期，过期了怎么办？**
+
+cert-manager 会在证书到期前 30 天自动触发 Renew。Renew 流程和首次签发一样——重新 HTTP-01 验证 → 签发新证书 → 更新 Secret → Traefik 自动加载。整个过程用户无感知。我们通过 cert-manager 的 `Certificate` 资源状态监控来确认续签是否成功（`Ready=True`）。
+
+**Q：你们的镜像里需要做什么适配吗？**
+
+需要在 Go 镜像中安装 ca-certificates 包（已经在 Dockerfile 里了），因为短链的 301 重定向目标可能是 HTTPS 站点（如 `https://kubernetes.io`），Go 标准库需要 CA 证书来验证目标站点的 TLS 证书。
+
+---
+
+### 2. External Secrets Operator ✅ 已做
+
+#### 为什么是 P0
+
+当前项目的 Secrets 管理方式是"手动 kubectl create + .gitignore 屏蔽"，这是 GitOps 流程的明显缺口。面试官一定会追问"你们 Secrets 怎么管理的？"，当前回答不够有说服力。ESO 把密钥管理纳入 GitOps 体系，补齐了"全声明式"的最后一块拼图。
+
+#### 实施思路
+
+| 组件 | 方案 |
+|------|------|
+| 后端存储 | 阿里云 Secrets Manager（免费额度足够） |
+| 同步工具 | External Secrets Operator v0.14+ |
+| 集成方式 | GitOps 管理 ExternalSecret CR，密钥存储在云上 |
+
+**实施步骤：**
+1. Helm 安装 ESO（需要为 ESO 创建 RAM 子账号 + 授权读取 Secrets Manager）
+2. 创建 SecretStore（指向阿里云 Secrets Manager，配置认证信息）
+3. 将现有 Secret 迁移到 Aliyun Secrets Manager
+4. 编写 ExternalSecret CR（声明要同步的密钥及其到 K8s Secret 的映射）
+5. 验证：删除集群中的 Secret → ESO 自动重建
+
+**ExternalSecret 示例：**
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: mysql-credentials
+  namespace: data-layer
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aliyun-secretstore
+    kind: SecretStore
+  target:
+    name: mysql-credentials
+  data:
+    - secretKey: root-password
+      remoteRef:
+        key: /k3s/mysql/root-password
+    - secretKey: repl-password
+      remoteRef:
+        key: /k3s/mysql/repl-password
+```
+
+#### 面试 Q&A
+
+**Q：你们 Secrets 怎么管理的？GitOps 下 Secrets 算不算配置？**
+
+我们用 External Secrets Operator 管理。Secret 的真正内容不存放在 Git 仓库里，而是放在阿里云 Secrets Manager。Git 仓库里只放 ExternalSecret CR——它声明了"我要从云上同步哪些密钥到 K8s"。ESO 负责执行同步。这样既保持了 GitOps 的全声明式模式（所有 K8s 资源都在 Git 里），又不会把明文密码提交到 Git。
+
+**Q：如果 Secrets Manager 本身挂了，K8s 里的 Secret 还能用吗？**
+
+可以。ESO 同步过来的 Secret 是持久化的 K8s Secret 对象，即使 Secrets Manager 暂时不可用，已有 Secret 不受影响，Pod 正常运行。只是无法刷新新的 Secret 版本。恢复后 ESO 自动重新同步。这就是 Operator 模式的好处——控制器在内存中有缓存，不会因为后端不可用就导致业务中断。
+
+**Q：为什么不直接用 sealed-secrets？**
+
+sealed-secrets 的方案是把加密后的 Secret 放到 Git 里。问题在于密钥轮转时需要重新加密所有 Secret，且加密密钥的管理也是一个问题。ESO 的方式更"云原生"——密钥存在云上，有审计日志、版本管理、自动轮转。中厂生产环境 ESO 是更主流的选择。
+
+---
+
+## ⭐ P1 — 推荐投入
+
+### 3. 数据库自动巡检脚本 ✅ 已做
+
+#### 为什么是 P1
+
+数据库是 SRE 重点关注对象。写一个自动化巡检脚本展示的是**日常运维自动化意识**——面试官会觉得"这个人有 DBA 意识"。而且这个方向实现成本极低（纯脚本，不占集群资源），面试时可以直接展示输出报告。
+
+#### 实施思路
+
+用 Shell 脚本 + 系统 cron，在 MySQL Slave（node-03）上每周执行一次：
+
+**巡检项：**
+
+| 类别 | 检查项目 | 命令/方式 |
+|------|---------|-----------|
+| 空间 | 表大小排名 TOP10 | `SELECT TABLE_NAME, ROUND(DATA_LENGTH/1024/1024) ... ORDER BY DATA_LENGTH DESC` |
+| 碎片 | 碎片率超过 30% 的表 | `SELECT TABLE_NAME, DATA_FREE/DATA_LENGTH ... WHERE DATA_FREE/DATA_LENGTH > 0.3` |
+| 慢查询 | 慢查询日志统计 | `mysqldumpslow /var/lib/mysql/*-slow.log` |
+| 复制 | 复制延迟 + 线程状态 | `SHOW REPLICA STATUS\G` 解析 `Seconds_Behind_Source` |
+| 连接 | 活跃连接数 + 来源 IP | `SHOW PROCESSLIST` |
+| 性能 | InnoDB buffer pool 命中率 | `SHOW STATUS LIKE 'innodb_buffer_pool_read%'` |
+| 错误 | 最近 7 天的 MySQL 错误日志 | `grep -i error /var/log/mysql/*.err` |
+
+**输出格式：**
+```
+========================================
+ MySQL 巡检报告
+ 时间: 2026-07-25 02:00
+ 节点: k3s-node-03 (Slave)
+========================================
+[基础信息]
+ MySQL 版本: 8.0.46
+ 运行时间: 30 天 4 小时
+ 复制状态: ✅ IO 线程 Running, SQL 线程 Running
+ 复制延迟: 0 秒
+
+[空间概览]
+ 总数据量: 771 MB
+ 最大表: shortlink.url_mapping (520 MB)
+ 碎片率 >30% 的表: 无 ✅
+
+[性能]
+ Buffer Pool 命中率: 99.7%
+ 慢查询 (上周): 3 条
+ 活跃连接: 2
+
+[告警]
+ 无
+========================================
+```
+
+#### 面试 Q&A
+
+**Q：你们有没有做数据库的日常巡检？**
+
+做了。写了一个巡检脚本在 MySQL Slave 节点上每周跑一次，输出结构化报告。检查内容包括表空间和碎片率（`DATA_FREE/DATA_LENGTH`）、TOP 10 慢查询（用 `mysqldumpslow` 解析）、复制延迟（`Seconds_Behind_Source`）、Buffer Pool 命中率（低于 95% 告警）、以及错误日志中的异常。报告结果通过 ossutil 推送到 OSS，方便对比趋势变化。
+
+**Q：巡检发现过什么问题吗？**
+
+有两个发现值得一提。一是慢查询中发现了一条没有索引的 `SELECT original_url` 查询——但是我们的查询条件已经是 `short_code` 列（有索引），实际上不是问题，只是慢查询日志的误报，确认后加了注释说明。另一个是碎片率监测：短链服务有频繁 INSERT 和 UPDATE（短码生成是 INSERT 后 UPDATE），短期内就会有一定碎片。虽然不是紧急问题，但我们在巡检中记录了基线数据，未来如果碎片率超过 50% 可以考虑 `OPTIMIZE TABLE`。
+
+**Q：为什么只在 Slave 上跑？Master 上跑有什么区别？**
+
+Slave 是只读的，巡检查询（`SELECT TABLE_NAME`, `SHOW PROCESSLIST`）不会影响业务写入。而且 Slave 的数据和 Master 一致（GTID 同步），巡检结果能反映整体状态。Master 上跑的话，`SELECT COUNT(*)` 这种全表扫描会占用资源，在高写入场景下有性能影响。
+
+---
+
+### 4. Kyverno 策略即代码 📖 了解
+
+#### 为什么是 P1
+
+"策略即代码"是面试高频话题——面试官会问"除了 PSS 你还做了什么安全措施？"。Kyverno 比 OPA Gatekeeper 更友好（原生 K8s 资源语法，不用学 Rego），部署成本低，而且可以写出很具体的"治理"效果。中厂 SRE 团队一般都会用策略引擎做合规，校招能谈到这个话题说明有生产安全意识。
+
+#### 实施规划
+
+| 策略 | 规则简述 | 效果 |
+|------|---------|------|
+| 禁止 latest 标签 | 检查 Pod 镜像标签，拒绝 `:latest` 或无 tag | 强制不可变部署 |
+| 强制 resources | 检查容器是否设置 `resources.requests` 和 `resources.limits` | 防止无限制 Pod 导致节点 OOM |
+| 强制 registry | 检查镜像是否来自允许的 registry（ACR VPC 域名） | 防止拉取未经审核的外部镜像 |
+| app-layer 非 root | 检查 `runAsNonRoot: true` | 强化 PSS restricted |
+
+**Kyverno 与 PSS 的关系：**
+PSS（Pod Security Standards）是 K8s 内置的准入控制，粒度较粗——只能按 namespace 设置 baseline/restricted 两个级别。Kyverno 可以写更精细的策略，比如"允许从哪些 registry 拉镜像"、"必须包含哪些 label"、"限制资源配比（limit/request 比值不超过 3）"。两者是互补关系：PSS 做基线，Kyverno 做个性化策略。
+
+#### 面试 Q&A
+
+**Q：你们 PSS 之外还有没有别的安全策略？**
+
+我们当前用 PSS 做了 namespace 级别的基线——app-layer=restricted, data-layer=baseline。PSS 之外我了解过 Kyverno。它的设计比 OPA Gatekeeper 更原生——直接用 K8s 资源 YAML 写策略，不需要专门学一种新语言（Rego）。我规划过 3 条策略但没有落地：禁止 latest 镜像标签、强制所有 Pod 填写 resources、限制镜像只能从我们的 ACR 仓库拉取。没落地主要原因是时间，但逻辑上已经梳理清楚了——PSS 解决"安全基线"，Kyverno 解决"组织规范"，两者是互补的。
+
+**Q：Kyverno 和 OPA Gatekeeper 你了解过区别吗？为什么选 Kyverno？**
+
+了解过。Kyverno 的最大优势是**学习成本低**——策略本身是 K8s 资源（`ClusterPolicy` 是一种 CRD），会写 K8s YAML 就会写 Kyverno 策略。OPA Gatekeeper 需要学习 Rego 语言，是声明式查询语言，虽然表达力更强但初学者上手慢。中厂环境里两个都有用，但 Kyverno 更常见于"运维团队自己维护策略"的场景，Gatekeeper 更常见于"有专门安全平台团队"的大厂。
+
+**Q：你可以举一个 PSS 覆盖不了但 Kyverno 可以覆盖的例子吗？**
+
+PSS 只能检查 Pod Spec 本身的属性（`runAsUser`、`capabilities`、`seccompProfile` 等）。但"镜像必须从指定的 registry 拉取"——这个策略 PSS 做不了，但 Kyverno 可以通过检查 Pod 的 `image` 字段前缀来实现。另一个例子：PSS 不能要求 Deployment 必须有 `app.kubernetes.io/name` 标签，但 Kyverno 可以。这些是"组织规范"层面的策略，不是"安全基线"层面的。
+
+---
+
+### 5. Canary 灰度发布 Flagger 📖 了解
+
+#### 为什么是 P1
+
+从 GitOps 滚动升级到 Canary 发布是"SRE 高阶部署策略"的标配。面试官听到"我们用的 FluxCD 滚动更新"和"我们用了 Flagger 做灰度发布"的信号强度完全不同。Canary 发布涉及流量管理、指标监控、自动回滚——覆盖了网络（Traefik 权重路由）、监控（成功率/延迟指标）、自动化（Flagger 控制器编排）三方面能力。
+
+#### 实施规划
+
+**为什么现在没做：** 当前集群还没有部署 Prometheus（属于可观测性那个项目的范畴），Flagger 依赖 Prometheus 提供成功率/延迟/错误率指标来做 canary 的健康判定。
+
+**如果实施的步骤：**
+1. 部署 Flagger CRD（Helm 或 Kustomize）
+2. 创建 Canary CR（目标是 `shortlink` Deployment，流量通过 Traefik Service）
+3. 配置 step 权重：10% → 20% → 40% → 60% → 80% → 100%，每个 step 观察 2 分钟
+4. 配置健康指标：HTTP 请求成功率（>99%）、P99 延迟（<500ms）、错误率（<1%）
+5. 测试验证：push 一个带错误代码的新版本，观察 Flagger 自动回滚
+
+**Flagger Canary CR 关键配置：**
+```yaml
+apiVersion: flagger.app/v1beta1
+kind: Canary
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shortlink
+  service:
+    port: 8080
+  ingressRef:
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: shortlink
+  analysis:
+    interval: 2m
+    maxWeight: 100
+    stepWeight: 10
+    metrics:
+      - name: request-success-rate
+        threshold: 99
+        interval: 1m
+      - name: request-duration
+        threshold: 500
+        interval: 1m
+```
+
+#### 面试 Q&A
+
+**Q：你们用 GitOps + FluxCD，发布策略是什么样的？**
+
+当前是滚动更新（默认策略）。但我了解过 Flagger 的 canary 发布方案和我们环境集成的可行性。Flagger 通过调控 Service 的权重逐步切流量——新版本先接收 10% 流量，观察 2 分钟，检查 HTTP 成功率（>99%）和延迟（<500ms），通过后再切到 20%、40%...直到 100%。如果任何一个 Step 的指标超出阈值，Flagger 自动将 100% 流量切回旧版本、标记新版本为失败。
+
+**Q：为什么没落地 Flagger？**
+
+Flagger 需要 Prometheus 提供指标数据来做 canary 的健康判定。Prometheus 和相关告警规则我计划放在可观测性那个项目中做，和这个集群项目是分开设计的。从技术上来说，Flagger + Traefik 的集成方案我已经验证过可行（Flagger 官方提供了 Traefik 的 service mesh 配置），但受限于项目边界没有落地。
+
+**Q：你们现在的滚动更新有什么问题？Canary 能解决什么？**
+
+滚动更新的问题是**全有或全无**——新版本部署完成后才会发现异常，即使只有 1 个异常副本，也会影响部分用户。Canary 发布的核心价值是**风险前置**——在影响面还很小（10% 流量）的时候就发现异常，自动回滚。对于短链服务这种业务来说，滚动更新够了；但如果是有支付流程的关键业务，Canary 是必须的。
+
+---
+
+## ⭐ P2 — 有余力投入
+
+### 6. Longhorn 分布式存储 📖 了解
+
+#### 为什么是 P2
+
+当前用 K3s 内置的 local-path-provisioner，数据存储在单节点磁盘上——有单点风险（如果该节点磁盘损坏，Redis PVC 数据丢失）。分布式存储能解决这个问题，但 Longhorn 对资源有额外消耗（每个 volume 的 replica 需要磁盘和内存），校招项目用 local-path 完全合理。有这个概念就好。
+
+#### 实施规划
+
+**为什么现在没做：** 3 个节点的数据盘都已经被 MySQL 数据占用（node-02/03 各约 771M），剩余磁盘空间有限。Longhorn 的 replica 机制要求每个 volume 有 2-3 个副本，需要额外的磁盘空间。
+
+**如果实施的步骤：**
+1. 在每个节点上预留一个未分区磁盘或目录（`/var/lib/longhorn/`）
+2. 部署 Longhorn（Helm install）
+3. 将 Redis 的 StorageClass 从 `local-path` 切换为 `longhorn`
+4. 验证：删除一个节点上的 Redis Pod → Pod 调度到其他节点 → Longhorn 从 replica 自动恢复数据
+
+**Longhorn 与 local-path 的对比：**
+
+| 特性 | local-path (当前) | Longhorn |
+|------|-------------------|----------|
+| 跨节点高可用 | ❌ 单点 | ✅ 多 replica |
+| 备份能力 | ❌ 无原生备份 | ✅ 内置快照 + 备份到 S3 |
+| 资源消耗 | 几乎无 | ~每 volume 500MB 额外空间 |
+| 安装复杂度 | K3s 内置 | 需要额外 3 个 Pod + CRD |
+| 扩容 | ❌ 不支持 | ✅ 在线扩容 |
+| 校招适配 | ✅ 完全够用 | ⚠️ 资源紧张 |
+
+#### 面试 Q&A
+
+**Q：你们的存储怎么做的？有没有单点风险？**
+
+当前用的是 K3s 内置的 local-path-provisioner，Redis 的 PVC 数据存在本机磁盘上。严格来说有单点风险——如果节点磁盘损坏，local-path 没有跨节点副本，数据会丢失。但 Redis 本身是主从架构，一个节点的数据丢了可以从 Master 重新复制，所以风险可以接受。
+
+**Q：考虑过 Longhorn 吗？**
+
+了解过。Longhorn 是 CNCF 毕业项目，本质是把每个节点的磁盘池化成分布式存储池，给 volume 创建多份 replica 分布在不同节点上。如果替换，流程是：在 3 个节点上各部署一个 Longhorn agent → Helm 安装 Longhorn → 创建 StorageClass → 修改 Redis StatefulSet 的 PVC 模板引用新的 StorageClass。没有落地的主要原因是——3 个节点的磁盘资源已经很紧张（MySQL + 系统盘），Longhorn 每个 volume 默认 3 副本，磁盘压力会翻倍。在校招项目里，local-path + Redis 主从复制已经能覆盖数据安全需求。
+
+**Q：Longhorn 的 rebuild 过程是怎样的？如果节点挂了数据恢复要多久？**
+
+Longhorn 的 Engine 进程监控 volume 的 replica 健康状态。当一个 replica 所在的节点不可用时，Engine 标记该 replica 为 faulted，然后自动在其他健康节点的空闲磁盘上创建新的 replica，通过从其他健康 replica 同步数据来 rebuild。对于 512Mi 的 Redis PVC，rebuild 应该 <30 秒。这个过程不影响 volume 的读写——只要还有一个健康 replica，Engine 就可以继续提供服务。
+
+---
+
+### 7. 自定义指标 HPA 📖 了解
+
+#### 为什么是 P2
+
+CPU-based HPA 是最基础的弹性策略。面试官可能会追问"CPU 真的能准确反映你的业务负载吗？"。如果能提到自定义指标（Redis QPS、HTTP 请求速率），说明对 K8s 弹性伸缩的理解不止表面。但这个方向依赖 Prometheus（可观测性项目），而且短链场景请求量小，CPU HPA 已经够用。
+
+#### 实施规划
+
+**为什么现在没做：** 需要 Prometheus 采集指标 + Prometheus Adapter 转换为 K8s 自定义指标，与可观测性项目有边界重叠。而且短链服务当前请求量小（CPU 2%/70%），HPA 尚未触发过扩容，自定义指标的实际价值暂时不大。
+
+**如果实施的步骤：**
+1. 部署 Prometheus + kube-state-metrics
+2. 部署 Prometheus Adapter（将 Prometheus 查询暴露为 K8s 自定义指标 API）
+3. 配置指标规则：如 `http_requests_per_second`、`redis_qps`
+4. 修改 HPA 引用自定义指标
+
+**HPA 引用自定义指标示例：**
+```yaml
+metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: 100
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+#### 面试 Q&A
+
+**Q：你们只有 CPU-based HPA？CPU 真的能反映业务负载吗？**
+
+当前确实只有 CPU 70% 的 HPA。CPU 对短链服务来说是一个合理的弹性指标——请求量上升 → Go 应用处理请求 → CPU 升高。但我了解过 Prometheus Adapter 的方案。它的工作方式是：Prometheus 采集指标 → Prometheus Adapter 注册为 `custom.metrics.k8s.io` API → HPA 引用自定义指标。如果做的话，我会考虑用 `http_requests_per_second`（HTTP 请求速率）作为扩容指标，这对 Web 服务来说比 CPU 更直接。
+
+**Q：自定义指标和 CPU 指标有什么本质区别？**
+
+CPU 是 Resource 指标，由 metrics-server 提供，反映的是"Pod 用了多少 CPU"。自定义指标是业务指标，反映的是"Pod 在处理多少负载"。HTTP 请求速率就是典型的自定义指标——可能 CPU 才 30% 但请求量已经快到上限了（比如因为数据库连接池满了），CPU 不会触发扩容但自定义指标会。
+
+---
+
+## 8. 暂不推荐的方向
+
+以下方向在校招阶段性价比偏低，不建议投入时间：
+
+| 方向 | 不推荐理由 | 替代建议 |
+|------|-----------|---------|
+| **Service Mesh（Istio/Linkerd）** | 3 节点 2C2G 跑不动 Istio；中厂校招不指望你会 Service Mesh | 先做好 HTTPS + NetworkPolicy，安全基线到位更重要 |
+| **多集群联邦（Karmada）** | 只有一个集群，没有联邦需求；面试问不出深度 | 把单集群做深比浅尝多集群更有价值 |
+| **Cluster API（CAPI）** | 需要额外管理集群的基础设施；K3s 有自己的一套升级机制 | 先掌握 `system-upgrade-controller` 做 K3s 版本升级 |
+| **IPv6 双栈** | 面试几乎不会问；中厂 IPv6 普及率不高 | 不如把 IPv4 层面的网络策略吃透 |
+| **Gateway API** | 标准还在演进，中厂生产很少迁移到 Gateway API | Traefik Ingress 在当前场景完全够用 |
+| **Karpenter/抢占式实例** | 云厂商绑定；校招面试官不一定熟悉具体云产品 | 先理解 HPA + PDB + 干扰预算这些 K8s 原生弹性机制 |
+| **Renovate Bot 依赖更新** | 自动化价值高但面试信号弱（不同人问不出深度） | 有精力先做 Kyverno 策略，面试更能展示 |
+
+---
+
+## 投入路线图总结
+
+```
+现在 ───────────────────────────────────────────────► 面试前
+
+第 1 周                    第 2 周                    第 3-4 周
+┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐
+│ HTTPS +      │    │ External     │    │ 数据库巡检脚本        │
+│ cert-manager │    │ Secrets      │    │ (脚本 + cron + 报告)  │
+│ (1-2 天)     │    │ Operator     │    │ (1 天)               │
+│              │    │ (2-3 天)     │    │                      │
+│ 买域名 +     │    │ RAM 授权 +   │    │ Kyverno 研究         │
+│ ClusterIssuer│    │ secret 迁移  │    │ + 策略编写           │
+│ + Ingress 改 │    │ + 验证回滚   │    │ (2-3 天)             │
+└──────────────┘    └──────────────┘    └──────────────────────┘
+                                              │
+                                      ┌───────▼────────┐
+                                      │ Canary Flagger  │
+                                      │ Longhorn 调研    │
+                                      │ (了解即可, 面试  │
+                                      │  用"了解"口径)   │
+                                      └────────────────┘
+```
+
+**最低配置（时间不够只做这些）：** HTTPS + cert-manager ✅ 仅此一项就能让项目从"可以"变成"不错"
+
+**推荐配置（有时间）：** HTTPS + ESO + 自动巡检 + Kyverno 策略 → 面试能讲的深度和广度都够了
+
+**理想配置（时间充裕）：** 推荐配置 + Flagger 调研 + Longhorn 调研 → "这东西我了解过了"和"完全没听说过"在面试中是量级的差距
