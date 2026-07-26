@@ -15,5 +15,5 @@ spec:
     prefix: velero-backups
   config:
     region: cn-hangzhou
-    s3ForcePathStyle: "true"
+    s3ForcePathStyle: "false"
     s3Url: "https://oss-cn-hangzhou-internal.aliyuncs.com"
