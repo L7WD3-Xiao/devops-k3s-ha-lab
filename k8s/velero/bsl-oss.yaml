@@ -16,4 +16,5 @@ spec:
   config:
     region: cn-hangzhou
     s3ForcePathStyle: "false"
+    checksumAlgorithm: ""
     s3Url: "https://oss-cn-hangzhou-internal.aliyuncs.com"
