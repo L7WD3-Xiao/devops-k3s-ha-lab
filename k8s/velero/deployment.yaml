@@ -30,7 +30,7 @@ spec:
               memory: 128Mi
           volumeMounts:
             - name: plugins
-              mountPath: /plugins
+              mountPath: /target
       containers:
         - name: velero
           image: velero/velero:v1.15.0
