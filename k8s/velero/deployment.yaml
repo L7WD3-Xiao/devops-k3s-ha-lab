@@ -35,6 +35,7 @@ spec:
         - name: velero
           image: velero/velero:v1.15.0
           imagePullPolicy: IfNotPresent
+          command: ["/velero"]
           args:
             - server
             - --default-volumes-to-fs-backup=true
