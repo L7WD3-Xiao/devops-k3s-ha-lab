@@ -1,0 +1,19 @@
+---
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: default
+  namespace: velero
+spec:
+  provider: aws
+  default: true
+  credential:
+    name: cloud-credentials
+    key: cloud
+  objectStorage:
+    bucket: k3s-backup-velero
+    prefix: velero-backups
+  config:
+    region: cn-hangzhou
+    s3ForcePathStyle: "true"
+    s3Url: "https://oss-cn-hangzhou-internal.aliyuncs.com"

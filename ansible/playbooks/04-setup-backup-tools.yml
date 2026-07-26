@@ -1,0 +1,290 @@
+---
+# 04-setup-backup-tools.yml
+# 在 MySQL Slave (node-03) 安装备份工具:
+#   - percona-xtrabackup-80 (MySQL 物理备份)
+#   - ossutil (阿里云 OSS CLI)
+# 部署 xtrabackup-backup.sh 脚本 + cron (每日 02:00)
+#
+# 前提:
+#   - group_vars/all.yml 已填写 oss_access_key_id/secret
+#   - OSS bucket k3s-backup-velero 已创建
+#
+# 用法:
+#   ansible-playbook -i inventory.ini playbooks/04-setup-backup-tools.yml
+#
+# 验证:
+#   ansible-playbook -i inventory.ini playbooks/04-setup-backup-tools.yml --tags verify
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Validate OSS credentials are set
+# ──────────────────────────────────────────────────────────────
+- name: Validate OSS configuration
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Check oss_access_key_id is set
+      assert:
+        that:
+          - oss_access_key_id is defined
+          - oss_access_key_id | length > 0
+          - oss_access_key_id != 'CHANGE_ME'
+        fail_msg: >
+          oss_access_key_id is empty or still placeholder. Set it in group_vars/all.yml.
+        success_msg: "OSS AccessKey ID is set"
+
+    - name: Check oss_access_key_secret is set
+      assert:
+        that:
+          - oss_access_key_secret is defined
+          - oss_access_key_secret | length > 0
+          - oss_access_key_secret != 'CHANGE_ME'
+        fail_msg: >
+          oss_access_key_secret is empty or still placeholder. Set it in group_vars/all.yml.
+        success_msg: "OSS AccessKey Secret is set (hidden)"
+
+    - name: Check OSS bucket name
+      assert:
+        that:
+          - oss_bucket is defined
+          - oss_bucket | length > 0
+        success_msg: "OSS bucket: {{ oss_bucket }}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: Download RPMs and ossutil on node-01 (has internet)
+# ──────────────────────────────────────────────────────────────
+- name: Download backup tools on node-01 (internet gateway)
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create tools directory
+      file:
+        path: /tmp/backup-tools
+        state: directory
+        mode: '0755'
+
+    - name: Download percona-release RPM
+      get_url:
+        url: https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+        dest: /tmp/backup-tools/percona-release-latest.noarch.rpm
+        timeout: 30
+      register: percona_release_dl
+      until: percona_release_dl is success
+      retries: 3
+      delay: 5
+
+    - name: Install percona-release repo (temporarily)
+      command: rpm -Uvh /tmp/backup-tools/percona-release-latest.noarch.rpm
+      args:
+        creates: /etc/yum.repos.d/percona-release.repo
+      register: percona_repo_install
+
+    - name: Enable Percona repository for xtrabackup
+      command: percona-release enable-only tools release
+      when: percona_repo_install.changed
+      register: percona_repo_enable
+      changed_when: percona_repo_enable.rc == 0
+
+    - name: Install dnf-plugins-core (for yumdownloader)
+      dnf:
+        name: dnf-plugins-core
+        state: present
+      register: dnf_plugins
+
+    - name: Download percona-xtrabackup-80 and qpress RPMs with dependencies
+      command: >
+        yumdownloader --resolve --destdir=/tmp/backup-tools
+        percona-xtrabackup-80 qpress
+      register: yum_download
+      changed_when: '"Nothing to download" not in yum_download.stdout'
+      # yumdownloader returns 0 even when nothing to download
+
+    - name: List downloaded RPMs
+      find:
+        paths: /tmp/backup-tools
+        patterns: "*.rpm"
+      register: downloaded_rpms
+
+    - name: Show downloaded RPMs count
+      debug:
+        msg: "Downloaded {{ downloaded_rpms.files | length }} RPMs to /tmp/backup-tools/"
+
+    - name: Download ossutil binary
+      get_url:
+        url: https://gosspublic.alicdn.com/ossutil/v1/ossutil64
+        dest: /tmp/backup-tools/ossutil64
+        mode: '0755'
+        timeout: 30
+      register: ossutil_dl
+      until: ossutil_dl is success
+      retries: 3
+      delay: 5
+
+    # Note: We keep percona-release repo installed for potential future updates.
+    # It doesn't affect node-03 since node-03 doesn't have it.
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Transfer and install tools on node-03 (no internet)
+# ──────────────────────────────────────────────────────────────
+- name: Install backup tools on node-03 (MySQL Slave)
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create tools directory on node-03
+      file:
+        path: /tmp/backup-tools
+        state: directory
+        mode: '0755'
+
+    - name: Synchronize RPMs from node-01 to node-03
+      synchronize:
+        src: /tmp/backup-tools/
+        dest: /tmp/backup-tools/
+        mode: push
+        compress: true
+      delegate_to: node-01
+
+    - name: Install percona-xtrabackup-80 and qpress
+      dnf:
+        name:
+          - /tmp/backup-tools/percona-xtrabackup-80*.rpm
+          - /tmp/backup-tools/qpress*.rpm
+        state: present
+        disable_gpg_check: true
+      register: xtrabackup_install
+      # disable_gpg_check: RPMs downloaded from official Percona repo
+
+    - name: Verify xtrabackup installation
+      command: xtrabackup --version
+      register: xtrabackup_ver
+      changed_when: false
+
+    - name: Show xtrabackup version
+      debug:
+        msg: "{{ xtrabackup_ver.stdout_lines[0] }}"
+
+    - name: Install ossutil binary
+      copy:
+        src: /tmp/backup-tools/ossutil64
+        dest: /usr/local/bin/ossutil
+        mode: '0755'
+        remote_src: true
+
+    - name: Verify ossutil installation
+      command: ossutil version
+      register: ossutil_ver
+      changed_when: false
+
+    - name: Show ossutil version
+      debug:
+        msg: "{{ ossutil_ver.stdout }}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 4: Configure ossutil + deploy backup script and cron
+# ──────────────────────────────────────────────────────────────
+- name: Configure backup system on node-03
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Deploy ossutil config
+      template:
+        src: ossutil-config.j2
+        dest: /root/.ossutilconfig
+        mode: '0600'
+
+    - name: Create backup directory
+      file:
+        path: /data/backups/mysql
+        state: directory
+        mode: '0755'
+
+    - name: Deploy xtrabackup-backup.sh script
+      copy:
+        src: ../../scripts/xtrabackup-backup.sh
+        dest: /usr/local/bin/xtrabackup-backup.sh
+        mode: '0755'
+      register: backup_script
+
+    - name: Test backup script dry-run
+      command: /usr/local/bin/xtrabackup-backup.sh --dry-run
+      register: dry_run
+      changed_when: false
+
+    - name: Show dry-run output
+      debug:
+        msg: "{{ dry_run.stdout_lines }}"
+
+    - name: Deploy cron job (daily 02:00)
+      cron:
+        name: "xtrabackup backup"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/xtrabackup-backup.sh >> /var/log/xtrabackup-backup.log 2>&1"
+        user: root
+        cron_file: xtrabackup-backup
+      register: cron_job
+
+    - name: Test OSS connectivity
+      command: >
+        {{ ossutil_bin | default('/usr/local/bin/ossutil') }}
+        ls oss://{{ oss_bucket }}/
+        -e {{ oss_endpoint }}
+      register: oss_test
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Show OSS connectivity result
+      debug:
+        msg: "OSS connectivity: {{ 'OK' if oss_test is success else 'FAILED' }}"
+      failed_when: oss_test is failed
+      # If OSS bucket doesn't exist yet, the playbook should fail here so the user
+      # knows to create it. Expected error: "oss: service returned error: Status=404"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 5: Summary
+# ──────────────────────────────────────────────────────────────
+- name: Display setup summary
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get cron next run time
+      command: >
+        bash -c 'echo "next" | crontab -u root -l 2>/dev/null | grep xtrabackup || echo "cron not set"'
+      register: cron_check
+      changed_when: false
+
+    - name: Show completion message
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " Backup tools installed on node-03"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " xtrabackup:     {{ xtrabackup_ver.stdout_lines[0] | default('(verify later)') }}"
+          - " ossutil:        {{ ossutil_ver.stdout | default('(verify later)') }}"
+          - " Backup dir:     /data/backups/mysql"
+          - " OSS bucket:     {{ oss_bucket }}"
+          - " OSS endpoint:   {{ oss_endpoint }}"
+          - ""
+          - " Cron:           0 2 * * * (daily 02:00 Asia/Shanghai)"
+          - " Script:         /usr/local/bin/xtrabackup-backup.sh"
+          - " Log:            /var/log/xtrabackup-backup.log"
+          - ""
+          - " Manual run:     sudo /usr/local/bin/xtrabackup-backup.sh"
+          - " Dry run:        sudo /usr/local/bin/xtrabackup-backup.sh --dry-run"
+          - ""
+          - "═══════════════════════════════════════════════════════"

@@ -1,0 +1,59 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  namespace: velero
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      serviceAccountName: velero
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: node-agent
+          image: velero/velero:v1.15.0
+          imagePullPolicy: IfNotPresent
+          args: [server, --node-agent, --log-level=info]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VELERO_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: host-pods
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: HostToContainer
+            - name: host-storage
+              mountPath: /var/lib/rancher/k3s/storage
+              mountPropagation: HostToContainer
+            - name: scratch
+              mountPath: /scratch
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: host-pods
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: host-storage
+          hostPath:
+            path: /var/lib/rancher/k3s/storage
+            type: DirectoryOrCreate
+        - name: scratch
+          emptyDir: {}

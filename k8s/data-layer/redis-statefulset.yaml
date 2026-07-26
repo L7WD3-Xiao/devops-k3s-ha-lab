@@ -48,6 +48,9 @@ spec:
     metadata:
       labels:
         app: redis
+      annotations:
+        # Velero FSB -- 备份 redis-data PVC
+        backup.velero.io/backup-volumes: redis-data
     spec:
       serviceAccountName: redis
       # Spread Redis pods across different nodes

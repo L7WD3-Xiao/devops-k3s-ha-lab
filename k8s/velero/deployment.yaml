@@ -1,0 +1,58 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: velero
+  namespace: velero
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: velero
+  template:
+    metadata:
+      labels:
+        app: velero
+    spec:
+      serviceAccountName: velero
+      nodeSelector:
+        kubernetes.io/hostname: node-02
+      initContainers:
+        - name: velero-plugin-for-aws
+          image: velero/velero-plugin-for-aws:v1.11.0
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins
+      containers:
+        - name: velero
+          image: velero/velero:v1.15.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - --default-volumes-to-fs-backup=true
+            - --use-volume-snapshots=false
+            - --backup-location-config=region=cn-hangzhou,s3ForcePathStyle=true,s3Url=https://oss-cn-hangzhou-internal.aliyuncs.com
+            - --bucket=k3s-backup-velero
+            - --prefix=velero-backups
+          env:
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /credentials/cloud
+          volumeMounts:
+            - name: cloud-credentials
+              mountPath: /credentials
+            - name: plugins
+              mountPath: /plugins
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: cloud-credentials
+          secret:
+            secretName: cloud-credentials
+        - name: plugins
+          emptyDir: {}

@@ -174,7 +174,9 @@ ossutil ls oss://k3s-backup-velero \
 
 **结论**：从 node-03 (Slave) 备份，使用 `--no-lock`（Slave 只读安全）+ `--slave-info`（记录 relay log 位置）。
 
-#### 2.2 Ansible Playbook：`ansible/playbooks/04-setup-backup-tools.yml`
+#### 2.2 Ansible Playbook
+
+`ansible/playbooks/04-setup-backup-tools.yml`
 
 **用途**：在 node-03 安装 percona-xtrabackup-80 + ossutil，部署备份脚本 + cron
 
@@ -232,7 +234,9 @@ ossutil ls oss://k3s-backup-velero \
 **Play 5：汇总** (hosts: node-03)
 - 显示已安装版本 + cron 计划 + 下次运行时间
 
-#### 2.3 模板：`ansible/playbooks/templates/ossutil-config.j2`
+#### 2.3 模板
+
+`ansible/playbooks/templates/ossutil-config.j2`
 
 ```ini
 # /root/.ossutilconfig
@@ -247,11 +251,14 @@ accessKeySecret = {{ oss_access_key_secret }}
 endpoint = {{ oss_endpoint }}
 ```
 
-#### 2.4 脚本：`scripts/xtrabackup-backup.sh`
+#### 2.4 脚本
+
+`scripts/xtrabackup-backup.sh`
 
 **用途**：xtrabackup 全量备份 → gzip 压缩 → 推送 OSS → 清理旧备份
 
 **风格约定**（参照 `build-push.sh`）：
+
 - `#!/usr/bin/env bash` + `set -euo pipefail`
 - `──` 分节注释
 - `${VAR:-default}` 环境变量默认值
@@ -785,7 +792,9 @@ ossutil ls oss://k3s-backup-velero/velero-backups/
 3. GTID auto-positioning 自动重建复制
 4. 如验证通过，可选择故障切换到 node-03 作为新 Master
 
-#### 4.2 新建文件：`ansible/playbooks/05-restore-mysql.yml`
+#### 4.2 新建文件
+
+`ansible/playbooks/05-restore-mysql.yml`
 
 ```yaml
 ---

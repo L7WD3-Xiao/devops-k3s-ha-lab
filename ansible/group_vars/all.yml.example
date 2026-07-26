@@ -102,3 +102,12 @@ acr_namespace: "shortlink123"
 acr_repository: "shortlink-app"
 acr_username: "CHANGE_ME"                 # ← 阿里云账号或 RAM 子账号
 acr_password: "CHANGE_ME"                 # ← ACR 控制台设置的固定密码
+
+# ── OSS Backup Configuration ───────────────────────────────
+oss_bucket: "k3s-backup-velero"
+oss_endpoint: "oss-cn-hangzhou-internal.aliyuncs.com"
+oss_region: "cn-hangzhou"
+oss_access_key_id: "CHANGE_ME"             # <- RAM AK
+oss_access_key_secret: "CHANGE_ME"         # <- RAM SK
+oss_mysql_backup_prefix: "mysql-backups"
+oss_velero_backup_prefix: "velero-backups"

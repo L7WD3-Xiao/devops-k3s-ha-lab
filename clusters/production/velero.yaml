@@ -1,0 +1,22 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: velero
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./k8s/velero
+  prune: true
+  wait: true
+  force: false
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: velero
+      namespace: velero

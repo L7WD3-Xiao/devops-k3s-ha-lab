@@ -1,0 +1,11 @@
+# /root/.ossutilconfig
+# Managed by Ansible -- do not edit manually
+# Node: {{ inventory_hostname }}
+
+[Credentials]
+provider = oss
+accessKeyId = {{ oss_access_key_id }}
+accessKeySecret = {{ oss_access_key_secret }}
+
+[Config]
+endpoint = {{ oss_endpoint }}

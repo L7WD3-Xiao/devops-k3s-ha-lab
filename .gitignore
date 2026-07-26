@@ -10,3 +10,6 @@ ansible/group_vars/all.yml
 # K8s Secret 含真实密码（脱敏模板 secret.yaml.example 入库）
 k8s/data-layer/secret.yaml
 k8s/app-layer/secret.yaml
+
+# Velero OSS credentials (gitignored, .example template committed)
+k8s/velero/cloud-credentials
