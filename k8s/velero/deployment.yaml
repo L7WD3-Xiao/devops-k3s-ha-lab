@@ -16,7 +16,7 @@ spec:
     spec:
       serviceAccountName: velero
       nodeSelector:
-        kubernetes.io/hostname: node-02
+        kubernetes.io/hostname: node-01
       initContainers:
         - name: velero-plugin-for-aws
           image: velero/velero-plugin-for-aws:v1.11.0
