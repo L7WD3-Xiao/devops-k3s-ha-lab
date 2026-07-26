@@ -182,7 +182,7 @@ Playbook 执行流程：
 
 ## 5. 操作步骤
 
-### 5.1 阿里云控制台手动操作（约 5 分钟）
+### Step 1 阿里云控制台手动操作（约 5 分钟）
 
 1. **开通 ACR 个人版**
    - 阿里云控制台 → 容器镜像服务 → 个人版 → 开启
@@ -204,7 +204,7 @@ Playbook 执行流程：
    - 类型：**私有**
    - 代码源：不绑定（手动构建推送）
 
-### 5.2 填入凭证并执行配置
+### Step 2 填入凭证并执行配置
 
 ```bash
 # 1. 从脱敏模板创建本地配置
@@ -261,11 +261,3 @@ kubectl delete pod acr-test
 
 ---
 
-## 7. 下一步
-
-- [x] 在阿里云控制台完成 ACR 个人版开通和仓库创建
-- [x] 填入 `acr_username` 和 `acr_password`
-- [x] 凭证脱敏（`all.yml` → `.gitignore`，`all.yml.example` 入库）
-- [ ] 执行 `03-configure-acr.yml` playbook
-- [ ] 推送测试镜像验证拉取链路
-- [ ] Phase 4：编写短链服务 Dockerfile + K8s Deployment

@@ -229,7 +229,7 @@ SENTINEL master mymaster:
 
 ---
 
-## 4. Orchestrator + ProxySQL（MySQL HA + 读写分离）
+## 4. MySQL HA + 读写分离
 
 ### 4.1 部署架构
 
