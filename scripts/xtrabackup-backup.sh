@@ -14,7 +14,9 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
 MYSQL_USER="${MYSQL_USER:-root}"
-MYSQL_PASSWORD="${MYSQL_PASSWORD:-CHANGE_ME}"
+# 密码由 /root/.my.cnf [client] 提供 (host=127.0.0.1 user=root password=XXX)
+# 脚本不传 --password 以防覆盖 my.cnf 配置
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
 BACKUP_DIR="${BACKUP_DIR:-/data/backups/mysql}"
 OSS_BUCKET="${OSS_BUCKET:-k3s-backup-velero}"
 OSS_PREFIX="${OSS_PREFIX:-mysql-backups}"
@@ -53,8 +55,8 @@ if ! command -v "${OSSUTIL_BIN}" &>/dev/null; then
     exit 1
 fi
 
-if ! mysqladmin ping -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent 2>/dev/null; then
-    echo "WARNING: MySQL not reachable with current credentials. Check MYSQL_USER/MYSQL_PASSWORD."
+if ! mysqladmin ping --silent 2>/dev/null; then
+    echo "WARNING: MySQL not reachable. Check /root/.my.cnf credentials."
     exit 1
 fi
 
@@ -74,10 +76,10 @@ fi
 # 密码通过 /root/.my.cnf [client] user=root password=XXX 提供
 
 echo "--- Starting xtrabackup: ${BACKUP_NAME} ---"
+# 密码由 /root/.my.cnf [client] host=127.0.0.1 user=root password=XXX 提供
+# 不传 --user/--password 以防覆盖 my.cnf 配置
 xtrabackup --backup \
   --stream=xbstream \
-  --user="${MYSQL_USER}" \
-  --password="${MYSQL_PASSWORD}" \
   --slave-info \
   --no-lock \
   --safe-slave-backup \
