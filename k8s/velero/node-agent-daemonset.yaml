@@ -14,13 +14,11 @@ spec:
         app: node-agent
     spec:
       serviceAccountName: velero
-      nodeSelector:
-        kubernetes.io/hostname: node-01
       securityContext:
         runAsUser: 0
       containers:
         - name: node-agent
-          image: velero/velero:v1.15.0
+          image: crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/velero-node-agent:v1.15.0
           imagePullPolicy: IfNotPresent
           command: ["/velero"]
           args: ["node-agent", "server", "--log-level=info"]
