@@ -7,11 +7,11 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: node-agent
+      name: node-agent
   template:
     metadata:
       labels:
-        app: node-agent
+        name: node-agent
     spec:
       serviceAccountName: velero
       securityContext:
