@@ -96,7 +96,7 @@
 | local-path-provisioner 无 CSI 快照支持 | VolumeSnapshotClass CRD 不存在，Velero 不能用 snapshot 方式 | 使用 FSB (File System Backup / kopia) |
 | MySQL 在物理机而非 K8s | Velero 无法覆盖 MySQL | xtrabackup 物理机脚本 + cron，与 Velero 分离 |
 | 仅 3 个 PVC (Redis) | ProxySQL/Orchestrator/Sentinel 均用 emptyDir | Velero FSB 实际只需备份 redis-data-redis-0/1/2 |
-| node-01 资源最小 (2C2G) | 已跑 FluxCD 6 controller + k3s server 756MB → OOM 风险 | Velero server/node-agent 全部运行在 node-01；备份前需缩 FluxCD 到 0 |
+| node-01 资源最小 (2C2G) | k3s server ~756MB + Velero server + node-agent kopia (~200MB) + data-layer pods → 峰值 ~1.4GB/2GB | Velero server/node-agent 钉住 node-01（唯一有公网拉取 ghcr.io/Docker Hub 镜像）；备份前缩 FluxCD 到 0 释放 ~400MB |
 | node-02/03 无公网 | RPM 下载需经 node-01 中转；镜像拉取失败（即使本地已缓存） | 同 Phase 3 airgap 模式；移除 registries.yaml 中 docker.io mirror |
 | Velero v1.15 label 硬编码 | `IsRunningInNode()` 用 `name=node-agent` 查找 Pod | DaemonSet label 必须匹配，不可用 `app=node-agent` |
 | Redis AOF 持久化延迟 | `SET` 后数据在内存，备份前未刷盘导致恢复后数据丢失 | 备份前对所有 Pod 执行 `BGREWRITEAOF` |
@@ -466,9 +466,9 @@ sudo bash -c \
 |--------|-----|
 | Velero 版本 | v1.15.0（或实施时最新稳定版） |
 | AWS 插件 | velero-plugin-for-aws:v1.11.0 |
-| 镜像来源 | Docker Hub `velero/velero`（通过 daocloud 镜像拉取） |
+| 镜像来源 | ACR VPC (`crpi-*.personal.cr.aliyuncs.com`) 推送 + node-01 Docker Hub 拉取 |
 | 备份模式 | FSB (File System Backup / kopia) |
-| 调度节点 | node-02 (2C4G，比 node-01 宽裕) |
+| 调度节点 | **node-01** (唯一有公网拉取 ghcr.io/Docker Hub 镜像；2C2G 需缩 FluxCD 防 OOM) |
 
 #### 3.2 前置：手动安装 Velero CRD
 
@@ -592,7 +592,7 @@ spec:
     spec:
       serviceAccountName: velero
       nodeSelector:
-        kubernetes.io/hostname: node-02    # 调度到 2C4G 节点
+        kubernetes.io/hostname: node-01    # node-01 唯一有公网拉取 ghcr.io/Docker Hub 镜像
       initContainers:
         - name: velero-plugin-for-aws      # 拷贝 S3 插件到 /target
           image: velero/velero-plugin-for-aws:v1.11.0
@@ -874,7 +874,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 | 验证项 | 结果 |
 |--------|------|
 | CRD ServerStatusRequest | ✅ 手动安装 |
-| velero Pod (node-02) | ✅ 1/1 Running |
+| velero Pod (node-01) | ✅ 1/1 Running |
 | node-agent (3 节点) | ✅ 每节点 1/1 Running |
 | BSL default | ✅ Available (`s3ForcePathStyle=false`, `checksumAlgorithm=""`) |
 | 测试备份 `test-backup-2` | ✅ Completed, 55 items, 0 errors, 0 warnings |
@@ -884,7 +884,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 
 1. **Velero 镜像拉取**：`velero/velero:v1.15.0` 在 Docker Hub，registries.yaml 已镜像 `docker.io` → `docker.m.daocloud.io`，所有节点应能拉取。如 daocloud 未镜像，走 airgap：node-01 拉取 → 导出 tarball → scp → K3s 自动导入
 2. **node-agent hostPath**：`/var/lib/rancher/k3s/storage` 是 K3s 特有路径，如 K3s 数据目录不同需调整。验证：`ssh node-03 'ls /var/lib/rancher/k3s/storage/'`
-3. **Velero server 在 node-02**：node-02 跑 MySQL Master (771M + 256M buffer pool)，Velero 增加 ~128-512M RAM，4G 内存应够。如 OOM 则迁移到 node-03
+3. **Velero server 在 node-01**：node-01 是唯一有公网的节点，FluxCD 控制器依赖 ghcr.io 镜像也必须在此节点。备份期间内存峰值：k3s ~756MB + Velero server ~100-200MB + node-agent kopia ~200MB + data-layer pods ~150MB = **~1.3-1.4GB**（2GB 总量）。备份前必须缩 FluxCD 到 0 释放 ~400MB
 4. **CRD 不在 Git**：CRD 手动安装，打破纯 GitOps 模型，但这是 Velero 标准实践
 5. **Schedule 时区**：默认 UTC，在 `metadata.annotations` 添加 `velero.io/timezone: Asia/Shanghai`。`spec.template.metadata.annotations` 不被 Schedule CRD 支持
 6. **defaultVolumesToFsBackup vs 注解**：Schedule 设 `true`（备份所有 PVC via FSB），StatefulSet 注解显式声明意图，两者保留
@@ -1257,7 +1257,8 @@ kubectl scale deploy -n flux-system --replicas=1 --all
 kubectl delete pod -n data-layer -l app=redis --field-selector=status.phase!=Running
 ```
 
-**清理**：
+**Step 7：清理**：
+
 ```bash
 kubectl exec -n data-layer redis-0 -- redis-cli DEL drill:test 2>/dev/null
 kubectl delete backup drill-backup -n velero
@@ -1323,18 +1324,6 @@ kubectl delete restore drill-restore -n velero
 | MySQL | 恢复数据损坏 | 停 mysqld → `mv /var/lib/mysql.pre-restore.<ts> /var/lib/mysql` → 启动 mysqld |
 | K8s | 恢复资源冲突 | `kubectl delete ns data-layer app-layer`（如损坏）→ `flux reconcile kustomization data-layer; flux reconcile kustomization app-layer` |
 | K8s | Redis 数据丢失 | FSB 恢复失败 = 数据丢失。从最新 Velero 备份重试，或从 GitOps 重建（无数据） |
-
----
-
-### Step 7：文档 + 提交
-
-**类型**：文档 + Git 操作
-**依赖**：所有前序步骤
-
-1. 完善 `docs/phase-7-backup-dr.md`（本文档）
-2. 更新 `README.md` 路线图（Phase 7 → 已完成）
-3. 更新 `.workbuddy/memory/MEMORY.md`
-4. Git commit
 
 ---
 
@@ -1441,7 +1430,7 @@ Step 1: OSS 基础设施 (手动) ───────────────�
 | 9 | Velero Schedule 时区 | 默认 UTC = 北京时间 +8h | 添加 `velero.io/timezone: Asia/Shanghai` 注解 |
 | 10 | Velero CRD 手动安装 | 打破纯 GitOps | Velero 标准实践，CRD 很少更新 |
 | 11 | node-02/03 无公网 | RPM 下载需经 node-01 | 同 Phase 3 airgap 模式 |
-| 12 | Velero server 在 node-02 | 与 MySQL Master 共享资源 | 2C4G 应够；如 OOM 迁移到 node-03 |
+| 12 | Velero server 在 node-01 | node-01 仅 2GB，备份时峰值 ~1.4GB | 备份前缩 FluxCD 到 0；长期考虑升级 node-01 到 4GB |
 | 13 | `--copy-back` 保留备份 | 占用额外磁盘空间 | 恢复验证后清理 `/tmp/mysql-restore/` |
 | 14 | GTID auto-positioning | 恢复后自动重建复制 | `SOURCE_AUTO_POSITION=1`，无需手动定位 binlog |
 | 15 | OSS Lifecycle Rule | 7 天自动删除 | 必须配置，否则备份无限增长 |
@@ -1471,6 +1460,3 @@ Step 1: OSS 基础设施 (手动) ───────────────�
 | 数据安全 | PV ReclaimPolicy=Delete 无兜底 | Velero FSB 备份 Redis PVC |
 | GitOps 管理 | app-layer + data-layer | + velero (新增 Kustomization CR) |
 
-## 9. 下一步
-
-- Phase 8：文档整理（README、架构文档、部署手册）
