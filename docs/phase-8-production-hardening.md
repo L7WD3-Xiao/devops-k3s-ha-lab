@@ -6,9 +6,9 @@
 
 | 模块 | 来源规划 | 原 P 级 | 核心价值 |
 |------|---------|--------|---------|
-| Phase 8.1 | HTTPS + cert-manager | P0 | 全链路加密，自动续签，消除"学生玩具"观感 |
-| Phase 8.2 | External Secrets Operator | P0 | Secrets 纳入 GitOps，补齐全声明式最后一块拼图 |
-| Phase 8.3 | 数据库自动巡检脚本 | P1 | 日常运维自动化意识，可展示的结构化巡检报告 |
+| Phase 1 | HTTPS + cert-manager | P0 | 全链路加密，自动续签，消除"学生玩具"观感 |
+| Phase 2 | External Secrets Operator | P0 | Secrets 纳入 GitOps，补齐全声明式最后一块拼图 |
+| Phase 3 | 数据库自动巡检脚本 | P1 | 日常运维自动化意识，可展示的结构化巡检报告 |
 
 **状态：计划已就绪，待执行**（本文档仅规划，不实际修改集群）
 
@@ -16,10 +16,10 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          外部用户 / 面试官                              │
-│                (浏览器 → https://shortlink.example.com)                │
+│                          内网客户端 / 面试演示机                              │
+│                (浏览器 → https://shortlink.internal)                │
 └───────────────────────────┬──────────────────────────────────────────┘
-                            │  DNS A → 116.62.168.245:443
+                            │  内网 DNS → 192.168.1.228:443
                 ┌───────────▼────────────┐
                 │  L7: Traefik (websecure) │  Ingress :443 + TLS
                 │  cert-manager 注入证书    │
@@ -29,24 +29,26 @@
         │                   │                            │
 ┌───────▼──────┐   ┌────────▼─────────┐         ┌────────▼────────┐
 │  app-layer   │   │  cert-manager    │         │ external-secrets│
-│ shortlink    │   │  (cert-manager   │         │  (data-layer    │
-│ (:8080 TLS)  │   │   ns, Cluster-   │         │   SecretStore + │
-│              │   │   Issuer, Cert)  │         │   ExternalSecret)│
+│ shortlink    │   │  (selfSigned →   │         │  (data-layer    │
+│ (:8080 TLS)  │   │   根CA → CA      │         │   SecretStore + │
+│              │   │   Issuer → Cert) │         │   ExternalSecret)│
 └───────┬──────┘   └────────┬─────────┘         └────────┬────────┘
         │                   │                            │
         │           ┌───────▼────────┐          ┌────────▼────────┐
-        │           │ Let's Encrypt  │          │ 阿里云 Secrets  │
-        │           │  (ACME HTTP-01)│          │  Manager (云上) │
+        │           │ 自签根 CA       │          │ 阿里云 Secrets  │
+        │           │ (10年/公钥分发) │          │  Manager (云上) │
         │           └────────────────┘          └─────────────────┘
         │
         ▼  MySQL 访问
 ┌──────────────────────────────────┐
-│  物理机 MySQL (node-02/03)         │  ◄── Phase 8.3 巡检脚本 (cron, node-03)
+│  物理机 MySQL (node-02/03)         │  ◄── Phase 3 巡检脚本 (cron, node-03)
 │  脚本输出报告 → ossutil → OSS      │
 └──────────────────────────────────┘
 ```
 
-**三模块关系**：cert-manager 解决"传输加密"；external-secrets 解决"密钥来源外置"；巡检脚本解决"数据库日常可观测"。三者互不依赖，可独立部署，但均纳入 GitOps 体系管理。
+**三模块关系**：cert-manager（自签 CA 两阶段签发）解决"传输加密"；external-secrets 解决"密钥来源外置"；巡检脚本解决"数据库日常可观测"。三者互不依赖，可独立部署，但均纳入 GitOps 体系管理。
+
+> **与原计划的关键差异**：因域名仅用于内网验证，不使用公网 CA（Let's Encrypt ACME 需公网 DNS + `:80` 可达，内网无法满足），改用 cert-manager selfSigned Issuer 签发私有根 CA，再由 CA Issuer 签发服务证书。客户端需手动导入根 CA 公钥以建立信任链。
 
 ## 3. 现状分析（增强前）
 
@@ -58,8 +60,9 @@
 
 **关键约束**：
 - K3s 内置 Traefik 默认有 `web` (`:80`) 和 `websecure` (`:443`) 两个 entrypoint；`websecure` 需证书才能生效。
-- Let's Encrypt HTTP-01 验证要求 `:80` 公网可达——当前 Traefik 已监听 `:80`，天然满足。
-- 需申请一个廉价域名（约 20-30 元/年），A 记录指向 EIP `116.62.168.245`。
+- **域名仅用于内网验证**，不对外提供服务，无需 ICP 备案、无需公网 DNS。使用内网域名 `shortlink.internal`，通过客户端 `/etc/hosts` 或 CoreDNS hosts 插件解析到 `192.168.1.228`（node-01 内网 IP）。
+- **不使用公网 CA**：Let's Encrypt ACME 验证要求公网 DNS + `:80` 公网可达，内网域名无法满足。改用 cert-manager selfSigned Issuer 签发私有根 CA（10 年），再由 CA Issuer 签发服务证书（1 年，自动续签）。
+- 客户端需手动导入根 CA 公钥到系统信任存储，否则浏览器/curl 报「不信任」错误。
 - ESO 云上后端选**阿里云 Secrets Manager**（免费额度足够，与现有 ACR/OSS 同账号体系）。
 - 巡检脚本复用 Phase 7 已安装的 `ossutil`，报告推送同一 OSS bucket。
 
@@ -67,11 +70,11 @@
 
 ## 4. 实施计划
 
-### 4.1 Phase 8.1 — HTTPS + cert-manager
+### 4.1 Phase 1 — HTTPS + cert-manager
 
-**目标**：为短链服务启用 HTTPS（TLS 1.2+），证书由 cert-manager 自动向 Let's Encrypt 申请并续签（90 天有效期，到期前 30 天自动 Renew）。
+**目标**：为短链服务全量启用 HTTPS（TLS 1.2+），证书由 cert-manager 通过 selfSigned → CA Issuer 两阶段签发（私有根 CA 10 年，服务证书 1 年，到期前 30 天自动 Renew）。因域名仅内网使用，不依赖公网 CA。
 
-#### 4.1.1 安装 cert-manager（GitOps 优先）
+#### Step 1 安装 cert-manager（GitOps 优先）
 
 推荐用 FluxCD `HelmRelease` 安装（与项目 GitOps-first 理念一致），与现有 `clusters/production/*.yaml` 模式对齐。
 
@@ -79,54 +82,72 @@
 
 | 文件 | 内容 |
 |------|------|
-| `clusters/production/cert-manager-install.yaml` | `HelmRepository`（jetstack  chart repo）+ `HelmRelease`（cert-manager，安装 CRD，`installCRDs: true`） |
+| `clusters/production/cert-manager-install.yaml` | `HelmRepository`（jetstack chart repo）+ `HelmRelease`（cert-manager，`installCRDs: true`，**覆盖镜像源为国内镜像**） |
 | `k8s/cert-manager/namespace.yaml` | `cert-manager` namespace（带 `cert-manager.io/disable-validation: true` 避免自举死锁） |
-| `k8s/cert-manager/clusterissuer-prod.yaml` | `ClusterIssuer` `letsencrypt-prod`（ACME 生产环境） |
-| `k8s/cert-manager/clusterissuer-staging.yaml` | `ClusterIssuer` `letsencrypt-staging`（测试用，限流宽松，避免压爆生产 API） |
+| `k8s/cert-manager/clusterissuer-selfsigned.yaml` | `ClusterIssuer` `selfsigned-issuer`（selfSigned）+ `Certificate` `k3s-root-ca`（isCA: true，10 年） |
+| `k8s/cert-manager/clusterissuer-ca.yaml` | `ClusterIssuer` `ca-issuer`（引用根 CA Secret 签发服务证书） |
 | `clusters/production/cert-manager.yaml` | FluxCD `Kustomization`（path `./k8s/cert-manager`，`dependsOn` cert-manager-install） |
 
-**ClusterIssuer（prod）关键字段**：
+> **镜像可达性**：cert-manager 镜像 `quay.io/jetstack/cert-manager-*` 国内不稳定。HelmRelease 的 `values` 段需覆盖 `image.repository` 为国内镜像（如 `docker.m.daocloud.io/jetstack/cert-manager-controller`）。jetstack chart 仓库 `charts.jetstack.io` 若不可达，HelmRepository 可配置 daocloud 代理或手动 `helm pull` airgap 安装。
+
+**两阶段签发配置**（selfSigned → 根 CA → CA Issuer → 服务证书）：
 ```yaml
+# 阶段1：selfSigned Issuer 签发根 CA 证书
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: letsencrypt-prod
+  name: selfsigned-issuer
 spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: ops@example.com          # ← 替换为真实邮箱
-    privateKeySecretRef:
-      name: letsencrypt-prod-key
-    solvers:
-      - http01:
-          ingress:
-            class: traefik
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: k3s-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: k3s-internal-ca
+  duration: 87600h              # 10 年
+  secretName: k3s-root-ca-secret
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+---
+# 阶段2：CA Issuer 用根 CA 签发服务证书
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ca-issuer
+spec:
+  ca:
+    secretName: k3s-root-ca-secret
 ```
 
-> 备选方案：若暂不强求 GitOps，可手动 `helm install cert-manager jetstack/cert-manager --set installCRDs=true -n cert-manager`。但本计划采用 GitOps 方案以保持一致。
+> 备选方案：若暂不强求 GitOps，可手动 `helm install cert-manager jetstack/cert-manager --set installCRDs=true -n cert-manager`，再 `kubectl apply -f` 上述 Issuer/Certificate。但本计划采用 GitOps 方案以保持一致。
 
-#### 4.1.2 修改 Ingress 添加 TLS
+#### Step 2 修改 Ingress 添加 TLS
 
 **修改文件**：`k8s/app-layer/ingress.yaml`
 
 拆分为两个 Ingress 资源：
-1. **主服务 Ingress**（`shortlink`）：绑定域名 `shortlink.example.com`，`websecure` entrypoint + TLS，cert-manager 自动签发。
-2. **健康检查 Ingress**（`shortlink-health`）：无 host、`web` entrypoint、仅 `/health` 路径，保留 IP 直接访问能力（如 `http://116.62.168.245/health` 仍可裸 IP 健康检查）。
+1. **主服务 Ingress**（`shortlink`）：绑定域名 `shortlink.internal`，`websecure` entrypoint + TLS，cert-manager 自动签发。
+2. **健康检查 Ingress**（`shortlink-health`）：无 host、`web` entrypoint、仅 `/health` 路径，保留 IP 直接访问能力（如 `http://192.168.1.228/health` 仍可裸 IP 健康检查）。
 
 ```yaml
 # 主服务 Ingress（修改后）
 metadata:
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: ca-issuer
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
   tls:
     - hosts:
-        - shortlink.example.com
+        - shortlink.internal
       secretName: shortlink-tls
   rules:
-    - host: shortlink.example.com
+    - host: shortlink.internal
       http:
         paths:
           - path: /
@@ -153,41 +174,76 @@ spec:
 
 **Go 镜像适配**：Dockerfile 已包含 `ca-certificates` 包（phase-4 已验证），301 重定向目标若为 HTTPS 站点，Go 标准库可验证目标 TLS 证书，无需额外改动。
 
-#### 4.1.3 验证
+#### Step 3 内网 DNS 解析
+
+内网域名 `shortlink.internal` 需解析到集群入口。三种方案按场景选用：
+
+| 方案 | 适用场景 | 配置 |
+|------|---------|------|
+| 客户端 `/etc/hosts` | 单机演示 | 追加 `192.168.1.228 shortlink.internal` |
+| CoreDNS hosts 插件 | 集群内 Pod 访问 | K3s CoreDNS ConfigMap 加 hosts 段 |
+| 内网自建 DNS（dnsmasq） | 多客户端长期使用 | 指向 node-01 内网 IP `192.168.1.228` |
+
+> Traefik Ingress 按 HTTP `Host` 头路由，DNS 必须正确解析。若通过 EIP `116.62.168.245` 访问，hosts 也指向 EIP。
+
+#### Step 4 客户端 CA 信任分发
+
+自签根 CA 证书默认不受任何客户端信任，需手动导入根 CA 公钥：
+
+```bash
+# 1. 从集群导出根 CA 公钥
+kubectl get secret k3s-root-ca-secret -n cert-manager \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > k3s-ca.pem
+
+# 2. 分发到客户端信任存储
+#    Windows: certutil -addstore -f Root k3s-ca.pem
+#    Linux:   cp k3s-ca.pem /etc/pki/ca-trust/source/anchors/ && update-ca-trust
+#    macOS:   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain k3s-ca.pem
+
+# 3. 验证信任链（不再需要 --insecure）
+curl -vI https://shortlink.internal/health    # TLS 握手成功，无证书警告
+```
+
+> **面试演示场景**：必须提前在演示用的电脑上导入 CA 公钥，否则面试官看到的是浏览器红色「不安全」警告页。
+
+#### Step 5 验证
 
 ```bash
 # cert-manager Pod 就绪
 kubectl get pods -n cert-manager
 
-# ClusterIssuer Ready
-kubectl get clusterissuer letsencrypt-prod    # READY=True
+# 两阶段 Issuer Ready
+kubectl get clusterissuer selfsigned-issuer   # READY=True
+kubectl get clusterissuer ca-issuer           # READY=True
+kubectl get certificate k3s-root-ca -n cert-manager  # READY=True（根 CA）
 
-# 证书签发（首次约 10-30s）
+# 服务证书签发（首次约 10-30s）
 kubectl get certificate -n app-layer          # READY=True
 kubectl get secret shortlink-tls -n app-layer # 存在
 
-# HTTPS 访问
-curl -vI https://shortlink.example.com/health # 200, 含 TLS 握手
-curl -I  http://116.62.168.245/health          # 仍可用（健康检查 Ingress）
+# HTTPS 访问（需已导入 CA 公钥，或用 --cacert）
+curl -vI https://shortlink.internal/health                     # 200, 含 TLS 握手
+curl -vI --cacert k3s-ca.pem https://shortlink.internal/health  # 或指定 CA 文件
+curl -I  http://192.168.1.228/health                           # 仍可用（健康检查 Ingress）
 
-# 续签验证（调到 staging 签发后观察 Certificate 状态）
+# 续签验证
 kubectl describe certificate shortlink-tls -n app-layer | grep "Renewal"
 ```
 
-#### 4.1.4 文件影响
+#### Step 6 文件影响
 
 | 类型 | 文件 |
 |------|------|
-| 新建 | `clusters/production/cert-manager-install.yaml`、`k8s/cert-manager/namespace.yaml`、`k8s/cert-manager/clusterissuer-prod.yaml`、`k8s/cert-manager/clusterissuer-staging.yaml`、`clusters/production/cert-manager.yaml` |
+| 新建 | `clusters/production/cert-manager-install.yaml`、`k8s/cert-manager/namespace.yaml`、`k8s/cert-manager/clusterissuer-selfsigned.yaml`、`k8s/cert-manager/clusterissuer-ca.yaml`、`clusters/production/cert-manager.yaml` |
 | 修改 | `k8s/app-layer/ingress.yaml` |
 
 ---
 
-### 4.2 Phase 8.2 — External Secrets Operator
+### 4.2 Phase 2 — External Secrets Operator
 
 **目标**：将 K8s Secret 的真正内容外置到**阿里云 Secrets Manager**，Git 仓库仅保留 `ExternalSecret` CR（声明"同步哪些密钥"），ESO 控制器负责拉取并渲染为 K8s Secret。补齐 GitOps 全声明式的最后一块拼图。
 
-#### 4.2.1 安装 ESO（GitOps 优先）
+#### Step 1 安装 ESO（GitOps 优先）
 
 **新建文件**：
 
@@ -199,7 +255,7 @@ kubectl describe certificate shortlink-tls -n app-layer | grep "Renewal"
 | `k8s/external-secrets/externalsecret-mysql.yaml` | `ExternalSecret` `mysql-credentials`（映射 5 个 key → data-layer/mysql-credentials） |
 | `clusters/production/external-secrets.yaml` | FluxCD `Kustomization`（path `./k8s/external-secrets`，`dependsOn` external-secrets-install） |
 
-#### 4.2.2 SecretStore 与 ExternalSecret 关键字段
+#### Step 2 SecretStore 与 ExternalSecret 关键字段
 
 ```yaml
 # SecretStore — 阿里云认证（ESO 自身 bootstrap 密钥）
@@ -247,7 +303,7 @@ spec:
       remoteRef: { key: /k3s/mysql/proxysql-radmin-password }
 ```
 
-#### 4.2.3 密钥迁移步骤
+#### Step 3 密钥迁移步骤
 
 1. **创建 RAM 子账号**：仅授予 Secrets Manager 读权限（`AliyunRAMReadOnlyAccess` 不必要，用自定义策略限定 `kms:Decrypt` + `secretsmanager:GetSecretValue`）。
 2. **在 Secrets Manager 写入 5 个密钥**：路径 `/k3s/mysql/*`，值来自 `group_vars/all.yml`（gitignored）的现有密码。
@@ -264,7 +320,7 @@ spec:
 - `k8s/data-layer/kustomization.yaml` — 移除 `secret.yaml` 资源引用
 - `ansible/group_vars/all.yml`（gitignored）+ `all.yml.example` — 新增 `aliyun_esm_access_key_id` / `aliyun_esm_access_key_secret` 变量（供文档与 RAM 配置参考）
 
-#### 4.2.4 验证
+#### Step 4 验证
 
 ```bash
 # ESO 控制器就绪
@@ -280,10 +336,10 @@ sleep 10
 kubectl get secret mysql-credentials -n data-layer   # 已重建
 
 # 业务功能不受影响
-curl http://116.62.168.245/health   # {"status":"ok"}
+curl http://192.168.1.228/health   # {"status":"ok"}
 ```
 
-#### 4.2.5 文件影响
+#### Step 5 文件影响
 
 | 类型 | 文件 |
 |------|------|
@@ -293,11 +349,11 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 
 ---
 
-### 4.3 Phase 8.3 — 数据库自动巡检脚本
+### 4.3 Phase 3 — 数据库自动巡检脚本
 
 **目标**：在 MySQL Slave（node-03）上以 cron 每周执行一次结构化巡检，覆盖空间/碎片/慢查询/复制/连接/性能/错误日志 7 个维度，报告经 `ossutil` 推送 OSS，形成可对比的趋势基线。
 
-#### 4.3.1 新建巡检脚本
+#### Step 1 新建巡检脚本
 
 **新建文件**：`scripts/db-inspect.sh`
 
@@ -331,7 +387,7 @@ mkdir -p "${REPORT_DIR}"
 # 5. 复制延迟: SHOW REPLICA STATUS → Seconds_Behind_Source
 # 6. 连接:     SHOW PROCESSLIST → 活跃连接数 + 来源 IP
 # 7. 性能:     SHOW STATUS LIKE 'innodb_buffer_pool_read%' → 命中率 = (1 - reads/reads_total)*100
-# 8. 错误:     grep -i error /var/log/mysql/*.err (近 7 天)
+#  错误:     grep -i error /var/log/mysql/*.err (近 7 天)
 
 # 每个 section 写入 $REPORT, 打印分隔线 + 标题
 
@@ -348,7 +404,7 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
  节点: k3s-node-03 (Slave)
 ========================================
 [基础信息]
- MySQL 版本: 8.0.46
+ MySQL 版本: 0.46
  运行时间: 30 天 4 小时
  复制状态: ✅ IO 线程 Running, SQL 线程 Running
  复制延迟: 0 秒
@@ -365,7 +421,7 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
 ========================================
 ```
 
-#### 4.3.2 新建 Ansible 部署 playbook
+#### Step 2 新建 Ansible 部署 playbook
 
 **新建文件**：`ansible/playbooks/08-db-inspect.yml`
 
@@ -379,7 +435,7 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
 
 **修改文件**：`ansible/group_vars/all.yml`（gitignored）+ `all.yml.example` — 若需新增巡检相关变量（如 `db_inspect_oss_prefix`），补充到 OSS 配置段。
 
-#### 4.3.3 验证
+#### Step 3 验证
 
 ```bash
 # 手动执行（dry-run 不可用时直接跑一次）
@@ -397,7 +453,7 @@ ossutil ls oss://k3s-backup-velero/mysql-inspect/
 ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
 ```
 
-#### 4.3.4 文件影响
+#### Step 4 文件影响
 
 | 类型 | 文件 |
 |------|------|
@@ -412,27 +468,27 @@ ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
 
 | 文件路径 | 模块 | 说明 |
 |---------|------|------|
-| `clusters/production/cert-manager-install.yaml` | 8.1 | HelmRepository + HelmRelease 安装 cert-manager |
-| `k8s/cert-manager/namespace.yaml` | 8.1 | cert-manager namespace |
-| `k8s/cert-manager/clusterissuer-prod.yaml` | 8.1 | ClusterIssuer（生产） |
-| `k8s/cert-manager/clusterissuer-staging.yaml` | 8.1 | ClusterIssuer（测试） |
-| `clusters/production/cert-manager.yaml` | 8.1 | FluxCD Kustomization |
-| `clusters/production/external-secrets-install.yaml` | 8.2 | HelmRepository + HelmRelease 安装 ESO |
-| `k8s/external-secrets/namespace.yaml` | 8.2 | external-secrets namespace |
-| `k8s/external-secrets/secretstore-aliyun.yaml` | 8.2 | SecretStore（阿里云） |
-| `k8s/external-secrets/externalsecret-mysql.yaml` | 8.2 | ExternalSecret（MySQL 凭证） |
-| `clusters/production/external-secrets.yaml` | 8.2 | FluxCD Kustomization |
-| `scripts/db-inspect.sh` | 8.3 | 数据库巡检脚本 |
-| `ansible/playbooks/08-db-inspect.yml` | 8.3 | Ansible 部署 playbook |
+| `clusters/production/cert-manager-install.yaml` | 1 | HelmRepository + HelmRelease 安装 cert-manager（镜像源覆盖为国内镜像） |
+| `k8s/cert-manager/namespace.yaml` | 1 | cert-manager namespace |
+| `k8s/cert-manager/clusterissuer-selfsigned.yaml` | 1 | selfSigned ClusterIssuer + 根 CA Certificate（10 年） |
+| `k8s/cert-manager/clusterissuer-ca.yaml` | 1 | CA ClusterIssuer（用根 CA 签服务证书） |
+| `clusters/production/cert-manager.yaml` | 1 | FluxCD Kustomization |
+| `clusters/production/external-secrets-install.yaml` | 2 | HelmRepository + HelmRelease 安装 ESO |
+| `k8s/external-secrets/namespace.yaml` | 2 | external-secrets namespace |
+| `k8s/external-secrets/secretstore-aliyun.yaml` | 2 | SecretStore（阿里云） |
+| `k8s/external-secrets/externalsecret-mysql.yaml` | 2 | ExternalSecret（MySQL 凭证） |
+| `clusters/production/external-secrets.yaml` | 2 | FluxCD Kustomization |
+| `scripts/db-inspect.sh` | 3 | 数据库巡检脚本 |
+| `ansible/playbooks/08-db-inspect.yml` | 3 | Ansible 部署 playbook |
 
 ### 修改文件（5 个）
 
 | 文件路径 | 模块 | 变更内容 |
 |---------|------|---------|
-| `k8s/app-layer/ingress.yaml` | 8.1 | 拆分主/健康 Ingress，添加 TLS + cert-manager annotation |
-| `k8s/data-layer/kustomization.yaml` | 8.2 | 移除 `secret.yaml` 引用（ESO 接管） |
-| `ansible/group_vars/all.yml.example` | 8.2 / 8.3 | 新增 ESM + 巡检相关变量说明 |
-| `k8s/data-layer/secret.yaml` | 8.2 | 移出 GitOps 管理（保留 `.example`） |
+| `k8s/app-layer/ingress.yaml` | 1 | 拆分主/健康 Ingress，添加 TLS + cert-manager annotation |
+| `k8s/data-layer/kustomization.yaml` | 2 | 移除 `secret.yaml` 引用（ESO 接管） |
+| `ansible/group_vars/all.yml.example` | 2 / 3 | 新增 ESM + 巡检相关变量说明 |
+| `k8s/data-layer/secret.yaml` | 2 | 移出 GitOps 管理（保留 `.example`） |
 | `README.md` | 全 | Phase 8 路线图状态更新 |
 
 ## 6. 部署顺序与回滚
@@ -440,62 +496,61 @@ ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
 ### 推荐部署顺序
 
 ```
-Phase 8.1 (HTTPS):
+Phase 1 (HTTPS):
   1. 部署 cert-manager-install (HelmRelease) → 等待 CRD + Pod Ready
-  2. 部署 cert-manager Kustomization (namespace + ClusterIssuer ×2)
-  3. 修改 ingress.yaml (TLS + annotation) → 验证证书签发 + HTTPS 访问
-  4. 验证健康检查 Ingress 仍可用 (IP 裸访问)
+  2. 部署 cert-manager Kustomization (namespace + selfSigned Issuer + 根 CA Cert + CA Issuer)
+  3. 修改 ingress.yaml (TLS + ca-issuer annotation) → 验证证书签发
+  4. 配置内网 DNS 解析 (hosts / CoreDNS)
+  5. 导出根 CA 公钥并分发到客户端信任存储
+  6. 验证 HTTPS 访问 + 健康检查 Ingress 仍可用 (IP 裸访问)
 
-Phase 8.2 (ESO):
-  5. 创建 RAM 子账号 + Secrets Manager 写入 5 密钥
-  6. 手动创建 bootstrap Secret aliyun-eso-auth
-  7. 部署 external-secrets-install (HelmRelease)
-  8. 部署 external-secrets Kustomization (SecretStore + ExternalSecret)
-  9. 修改 data-layer/kustomization.yaml 移除 secret.yaml → 验证 ESO 重建 Secret
+Phase 2 (ESO):
+  7. 创建 RAM 子账号 + Secrets Manager 写入 5 密钥
+  8. 手动创建 bootstrap Secret aliyun-eso-auth
+  9. 部署 external-secrets-install (HelmRelease)
+  10. 部署 external-secrets Kustomization (SecretStore + ExternalSecret)
+  11. 修改 data-layer/kustomization.yaml 移除 secret.yaml → 验证 ESO 重建 Secret
 
-Phase 8.3 (巡检):
-  10. 编写 db-inspect.sh + 08-db-inspect.yml
-  11. Ansible 部署到 node-03 + 注册 cron
-  12. 手动执行验证报告生成 + OSS 推送
+Phase 3 (巡检):
+  12. 编写 db-inspect.sh + 08-db-inspect.yml
+  13. Ansible 部署到 node-03 + 注册 cron
+  14. 手动执行验证报告生成 + OSS 推送
 ```
 
-> 三个模块无相互依赖，可单独执行、单独回滚；推荐顺序为先 8.1（传输安全最显眼）、再 8.2（密钥治理）、最后 8.3（运维自动化）。
+> 三个模块无相互依赖，可单独执行、单独回滚。
 
 ### 回滚策略
 
 | 模块 | 回滚方式 |
 |------|---------|
-| 8.1 cert-manager | `kubectl delete -f` 安装资源 + 还原 ingress.yaml 为 HTTP-only；证书 Secret 残留无副作用 |
-| 8.2 ESO | `kubectl delete externalsecret`；还原 `data-layer/kustomization.yaml` 加回 `secret.yaml`；手动 `kubectl apply -f secret.yaml` 恢复静态 Secret |
-| 8.3 巡检 | `ansible` 删除 cron + 脚本；或停用 cron 任务 `crontab -r`（针对性） |
+| 1 cert-manager | `kubectl delete -f` 安装资源 + 还原 ingress.yaml 为 HTTP-only；证书 Secret 残留无副作用 |
+| 2 ESO | `kubectl delete externalsecret`；还原 `data-layer/kustomization.yaml` 加回 `secret.yaml`；手动 `kubectl apply -f secret.yaml` 恢复静态 Secret |
+| 3 巡检 | `ansible` 删除 cron + 脚本；或停用 cron 任务 `crontab -r`（针对性） |
 
 ## 7. 风险与注意事项
 
-| # | 模块 | 风险 | 影响 | 缓解措施 |
-|---|------|------|------|---------|
-| 1 | 8.1 | Let's Encrypt 生产 API 限流（同一域名每周 50 张） | 证书签发失败 | 先用 staging Issuer 验证流程，再切 prod |
-| 2 | 8.1 | HTTP-01 要求 `:80` 公网可达 | 验证失败 | Traefik 已监听 `:80`；确认安全组/防火墙放行 80/443 |
-| 3 | 8.1 | cert-manager 自举死锁（webhook 校验自身） | 安装卡住 | namespace 加 `cert-manager.io/disable-validation: true` |
-| 4 | 8.1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
-| 5 | 8.2 | ESO bootstrap Secret 与 ESO 管理的 Secret 同名冲突 | 循环依赖 | bootstrap `aliyun-eso-auth` 单独手动创建，不进 GitOps |
-| 6 | 8.2 | 移除 secret.yaml 后 ESO 未同步成功 | Pod 启动缺 Secret | 先确认 ExternalSecret READY 再移除静态 Secret |
-| 7 | 8.2 | Secrets Manager 不可用 | 无法刷新新版本 | 已有 K8s Secret 不受影响（Operator 缓存），业务无感知 |
-| 8 | 8.3 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
-| 9 | 8.3 | ossutil 未安装 | 报告推送失败 | playbook 幂等检查 `which ossutil`（Phase 7 已装） |
+| 模块 | 风险 | 影响 | 缓解措施 |
+|------|------|------|---------|
+| 1 | 自签 CA 证书默认不受客户端信任 | 浏览器/curl 报「不安全」 | Step 4 导出根 CA 公钥并分发到客户端信任存储 |
+| 1 | 内网域名无法公网解析 | Traefik Host 路由失效 | Step 3 配置 hosts / CoreDNS / dnsmasq 内网解析 |
+| 1 | cert-manager 镜像 `quay.io` 国内不可达 | 安装失败 | HelmRelease values 覆盖 image 为国内镜像源（daocloud） |
+| 1 | cert-manager 自举死锁（webhook 校验自身） | 安装卡住 | namespace 加 `cert-manager.io/disable-validation: true` |
+| 1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
+| 1 | 根 CA 到期需手动更换（10 年） | 所有客户端需重新导入 CA | 文档记录 CA 指纹；到期前手动续签并重新分发 |
+| 2 | ESO bootstrap Secret 与 ESO 管理的 Secret 同名冲突 | 循环依赖 | bootstrap `aliyun-eso-auth` 单独手动创建，不进 GitOps |
+| 2 | 移除 secret.yaml 后 ESO 未同步成功 | Pod 启动缺 Secret | 先确认 ExternalSecret READY 再移除静态 Secret |
+| 2 | Secrets Manager 不可用 | 无法刷新新版本 | 已有 K8s Secret 不受影响（Operator 缓存），业务无感知 |
+| 3 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
+| 3 | ossutil 未安装 | 报告推送失败 | playbook 幂等检查 `which ossutil`（Phase 7 已装） |
 
-## 8. 增强前后对比
+##  8. 增强前后对比
 
 | 维度 | 增强前 | 增强后 |
 |------|--------|--------|
 | 传输安全 | HTTP 明文 `:80` | HTTPS `:443` + cert-manager 自动续签 |
-| 证书管理 | 无 | ClusterIssuer + Certificate，90 天自动 Renew |
+| 证书管理 | 无 | selfSigned 根 CA（10 年）+ CA Issuer 签服务证书（1 年自动 Renew） |
 | 密钥来源 | 手动 `kubectl create` + gitignore | 阿里云 Secrets Manager + ExternalSecret 同步 |
 | GitOps 完整性 | Secrets 不在 Git 内 | 全声明式（ExternalSecret CR 在 Git） |
 | 数据库可观测 | 人工排查 | 每周结构化巡检报告 + OSS 趋势留存 |
-| 域名访问 | 仅 IP | 域名 + 证书（面试可直接演示 https） |
+| 域名访问 | 仅 IP | 内网域名 + 自签证书（需导入 CA 公钥后可演示 https） |
 
-## 9. 下一步
-
-- 回顾 Phase 1-7 整体架构，编写 `README.md` 终版与架构图
-- 可选：Kyverno 策略即代码（P1，当前为「📖 了解」）、Canary 灰度发布（依赖可观测性项目）
-- 简历文档整理：将 Phase 1-8 统一沉淀为「项目经历」描述
