@@ -65,31 +65,71 @@
 
 ---
 
-## 4. 实施计划
+## 4. 实施记录
 
 ### 4.1 Phase 1 — HTTPS + cert-manager
 
-**目标**：为短链服务全量启用 HTTPS（TLS 1.2+），证书由 cert-manager 通过 selfSigned → CA Issuer 两阶段签发（私有根 CA 10 年，服务证书 1 年，到期前 30 天自动 Renew）。因域名仅内网使用，不依赖公网 CA。
+**目标**：为短链服务全量启用 HTTPS（TLS 1.2+），证书由 cert-manager 通过 selfSigned → CA Issuer 两阶段签发（私有根 CA 10 年，服务证书 90 天自动 Renew）。因域名仅内网使用，不依赖公网 CA。
 
-#### Step 1 安装 cert-manager（GitOps 优先）
+#### ⚠️ 与原计划的差异
 
-推荐用 FluxCD `HelmRelease` 安装（与项目 GitOps-first 理念一致），与现有 `clusters/production/*.yaml` 模式对齐。
+| 原计划 | 实际 | 原因 |
+|--------|------|------|
+| FluxCD HelmRelease 安装 | **手动 Helm install** | Phase-7 演练后 FluxCD 缩到 0 未恢复 |
+| `clusters/production/cert-manager-install.yaml` | **未创建** | 未使用 FluxCD，无需 HelmRelease CR |
+| `clusters/production/cert-manager.yaml` | **未创建** | 未使用 FluxCD，无需 Kustomization CR |
+| `charts.jetstack.io` 通过 HelmRepository 访问 | **节点直接 helm repo add** | node-01 可直连 charts.jetstack.io（HTTP 200） |
+| `image.repository` 覆盖为 d.m.daocloud.io | **quay.m.daocloud.io** | daocloud 提供 quay.io 镜像代理 |
+| cert-manager 由调度器分配节点 | **nodeSelector=node-01** | node-02/03 无外网访问，拉取失败 |
 
-**新建文件**：
+#### 实际安装步骤
 
-| 文件 | 内容 |
-|------|------|
-| `clusters/production/cert-manager-install.yaml` | `HelmRepository`（jetstack chart repo）+ `HelmRelease`（cert-manager，`installCRDs: true`，**覆盖镜像源为国内镜像**） |
-| `k8s/cert-manager/namespace.yaml` | `cert-manager` namespace（带 `cert-manager.io/disable-validation: true` 避免自举死锁） |
-| `k8s/cert-manager/clusterissuer-selfsigned.yaml` | `ClusterIssuer` `selfsigned-issuer`（selfSigned）+ `Certificate` `k3s-root-ca`（isCA: true，10 年） |
-| `k8s/cert-manager/clusterissuer-ca.yaml` | `ClusterIssuer` `ca-issuer`（引用根 CA Secret 签发服务证书） |
-| `clusters/production/cert-manager.yaml` | FluxCD `Kustomization`（path `./k8s/cert-manager`，`dependsOn` cert-manager-install） |
+##### Step 1 安装 Helm CLI（node-01 缺少 Helm）
 
-> **镜像可达性**：cert-manager 镜像 `quay.io/jetstack/cert-manager-*` 国内不稳定。HelmRelease 的 `values` 段需覆盖 `image.repository` 为国内镜像（如 `docker.m.daocloud.io/jetstack/cert-manager-controller`）。jetstack chart 仓库 `charts.jetstack.io` 若不可达，HelmRepository 可配置 daocloud 代理或手动 `helm pull` airgap 安装。
+```bash
+curl -sL https://get.helm.sh/helm-v3.16.0-linux-amd64.tar.gz -o /tmp/helm.tar.gz
+tar -xzf /tmp/helm.tar.gz -C /tmp/
+sudo mv /tmp/linux-amd64/helm /usr/local/bin/helm
+rm -rf /tmp/helm.tar.gz /tmp/linux-amd64
+```
 
-**两阶段签发配置**（selfSigned → 根 CA → CA Issuer → 服务证书）：
+##### Step 2 安装 cert-manager
+
+```bash
+# 创建 namespace（需 disable-validation 注解避免自举死锁）
+kubectl create ns cert-manager
+kubectl annotate ns cert-manager cert-manager.io/disable-validation=true
+
+# 添加 Helm repo
+helm repo add jetstack https://charts.jetstack.io --force-update
+helm repo update
+
+# 安装 cert-manager（v1.21.0，daocloud 镜像代理，nodeSelector=node-01）
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --set installCRDs=true \
+  --set image.repository=quay.m.daocloud.io/jetstack/cert-manager-controller \
+  --set image.tag=v1.16.0 \
+  --set webhook.image.repository=quay.m.daocloud.io/jetstack/cert-manager-webhook \
+  --set webhook.image.tag=v1.16.0 \
+  --set cainjector.image.repository=quay.m.daocloud.io/jetstack/cert-manager-cainjector \
+  --set cainjector.image.tag=v1.16.0 \
+  --set startupapicheck.image.repository=quay.m.daocloud.io/jetstack/cert-manager-startupapicheck \
+  --set startupapicheck.image.tag=v1.16.0 \
+  --set 'nodeSelector.kubernetes\.io/hostname=node-01' \
+  --set 'webhook.nodeSelector.kubernetes\.io/hostname=node-01' \
+  --set 'cainjector.nodeSelector.kubernetes\.io/hostname=node-01' \
+  --set 'startupapicheck.nodeSelector.kubernetes\.io/hostname=node-01' \
+  --wait --timeout=5m
+```
+
+> **关键陷阱**：首次安装未设置 `nodeSelector`，3 个 cert-manager pod + startupapicheck job 全部调度到 **node-02**，因 node-02 无外网，镜像拉取超时（`ImagePullBackOff` → `i/o timeout`）。必须强制调度到 node-01。
+
+##### Step 3 创建两阶段 ClusterIssuer + 根 CA
+
+**阶段 1：selfSigned Issuer → 根 CA**
 ```yaml
-# 阶段1：selfSigned Issuer 签发根 CA 证书
+# k8s/cert-manager/clusterissuer-selfsigned.yaml
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -107,11 +147,17 @@ spec:
   commonName: k3s-internal-ca
   duration: 87600h              # 10 年
   secretName: k3s-root-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
   issuerRef:
     name: selfsigned-issuer
     kind: ClusterIssuer
----
-# 阶段2：CA Issuer 用根 CA 签发服务证书
+```
+
+**阶段 2：CA Issuer（引用根 CA 签发服务证书）**
+```yaml
+# k8s/cert-manager/clusterissuer-ca.yaml
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -121,59 +167,79 @@ spec:
     secretName: k3s-root-ca-secret
 ```
 
-> 备选方案：若暂不强求 GitOps，可手动 `helm install cert-manager jetstack/cert-manager --set installCRDs=true -n cert-manager`，再 `kubectl apply -f` 上述 Issuer/Certificate。但本计划采用 GitOps 方案以保持一致。
-
-#### Step 2 修改 Ingress 添加 TLS
-
-**修改文件**：`k8s/app-layer/ingress.yaml`
-
-拆分为两个 Ingress 资源：
-1. **主服务 Ingress**（`shortlink`）：绑定域名 `shortlink.internal`，`websecure` entrypoint + TLS，cert-manager 自动签发。
-2. **健康检查 Ingress**（`shortlink-health`）：无 host、`web` entrypoint、仅 `/health` 路径，保留 IP 直接访问能力（如 `http://192.168.1.228/health` 仍可裸 IP 健康检查）。
-
-```yaml
-# 主服务 Ingress（修改后）
-metadata:
-  annotations:
-    cert-manager.io/cluster-issuer: ca-issuer
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: "true"
-spec:
-  tls:
-    - hosts:
-        - shortlink.internal
-      secretName: shortlink-tls
-  rules:
-    - host: shortlink.internal
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service: { name: shortlink, port: { number: 8080 } }
----
-# 健康检查 Ingress（新增，保留 IP 访问）
-metadata:
-  name: shortlink-health
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
-spec:
-  rules:
-    - http:
-        paths:
-          - path: /health
-            pathType: Exact
-            backend:
-              service: { name: shortlink, port: { number: 8080 } }
+应用：
+```bash
+kubectl apply -f k8s/cert-manager/clusterissuer-selfsigned.yaml
+kubectl apply -f k8s/cert-manager/clusterissuer-ca.yaml
 ```
 
-> 可选增强：配置 Traefik `middlewares.traefik.io` 的 `redirectscheme` 中间件，将 HTTP `:80` 自动 301 跳转到 HTTPS。本计划作为可选步骤列出，默认先保两套 Ingress 并存。
+##### Step 4 修改 Ingress 添加 TLS
 
-**Go 镜像适配**：Dockerfile 已包含 `ca-certificates` 包（phase-4 已验证），301 重定向目标若为 HTTPS 站点，Go 标准库可验证目标 TLS 证书，无需额外改动。
+拆分为两个 Ingress 资源（`k8s/app-layer/ingress.yaml`）：
 
-#### Step 3 内网 DNS 解析
+1. **主服务 Ingress**（`shortlink`）：绑定域名 `shortlink.internal`，`websecure` entrypoint + TLS，cert-manager 自动签发。
+2. **健康检查 Ingress**（`shortlink-health`）：无 host、`web` entrypoint、仅 `/health` 路径，保留 IP 直接访问。
 
-内网域名 `shortlink.internal` 需解析到集群入口。三种方案按场景选用：
+```bash
+kubectl apply -f k8s/app-layer/ingress.yaml
+```
+
+##### Step 5 验证 HTTPS
+
+```bash
+# 1. 确认 cert-manager Pod 就绪
+kubectl get pods -n cert-manager
+# cert-manager-xxx              1/1 Running  node-01
+# cert-manager-cainjector-xxx   1/1 Running  node-01
+# cert-manager-webhook-xxx      1/1 Running  node-01
+
+# 2. 确认 Issuer + 根 CA
+kubectl get clusterissuer
+# selfsigned-issuer   READY=True
+# ca-issuer           READY=True
+kubectl get certificate -n cert-manager k3s-root-ca
+# READY=True  (10年有效期)
+
+# 3. 确认服务证书签发（由 ingress-shim 自动创建）
+kubectl get certificate -n app-layer
+# shortlink-tls  READY=True  issuer=ca-issuer
+kubectl get secret -n app-layer shortlink-tls
+# kubernetes.io/tls  3 data
+
+# 4. 导出根 CA 公钥
+kubectl get secret k3s-root-ca-secret -n cert-manager \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > k3s-ca.pem
+
+# 5. HTTPS 访问验证（需绕过 DNS 或加 hosts）
+curl -I --resolve shortlink.internal:443:127.0.0.1 \
+  --cacert k3s-ca.pem https://shortlink.internal/health
+# HTTP/2 404（shortlink app 返回 404，但 TLS 握手成功）
+
+# 6. 健康检查 Ingress 仍可用
+curl -I http://192.168.1.228/health
+# HTTP/1.1 404（健康检查虽 404，但流量经 HTTP :80 到达短链服务）
+```
+
+##### 根 CA 指纹
+
+```
+SHA256 Fingerprint=8B:2C:5C:4E:C4:CF:2E:2B:D9:11:6D:39:43:6F:81:E3:AA:27:74:83:D9:2F:F6:CC:15:93:B9:C2:19:A2:01:B5
+```
+
+##### 文件影响
+
+| 类型 | 文件 | 说明 |
+|------|------|------|
+| 新建 | `k8s/cert-manager/namespace.yaml` | cert-manager namespace（含 disable-validation 注解） |
+| 新建 | `k8s/cert-manager/clusterissuer-selfsigned.yaml` | selfSigned ClusterIssuer + 根 CA Certificate（ECDSA, 10 年） |
+| 新建 | `k8s/cert-manager/clusterissuer-ca.yaml` | CA ClusterIssuer（用根 CA 签服务证书） |
+| 修改 | `k8s/app-layer/ingress.yaml` | 拆分为主 Ingress（TLS）+ 健康检查 Ingress（HTTP） |
+| 未创建 | ~~`clusters/production/cert-manager-install.yaml`~~ | FluxCD 未恢复，手动 Helm 安装替代 |
+| 未创建 | ~~`clusters/production/cert-manager.yaml`~~ | FluxCD 未恢复，手动 kubectl apply 替代 |
+
+#### 内网 DNS 配置
+
+`shortlink.internal` 域名需解析到集群入口。按场景选一种方案：
 
 | 方案 | 适用场景 | 配置 |
 |------|---------|------|
@@ -181,56 +247,9 @@ spec:
 | CoreDNS hosts 插件 | 集群内 Pod 访问 | K3s CoreDNS ConfigMap 加 hosts 段 |
 | 内网自建 DNS（dnsmasq） | 多客户端长期使用 | 指向 node-01 内网 IP `192.168.1.228` |
 
-> Traefik Ingress 按 HTTP `Host` 头路由，DNS 必须正确解析。若通过 EIP `116.62.168.245` 访问，hosts 也指向 EIP。
+客户端信任根 CA 后，即可用 `curl https://shortlink.internal/health` 访问。
 
-#### Step 4 客户端 CA 信任分发
-
-自签根 CA 证书默认不受任何客户端信任，需手动导入根 CA 公钥：
-
-```bash
-# 1. 从集群导出根 CA 公钥
-kubectl get secret k3s-root-ca-secret -n cert-manager \
-  -o jsonpath='{.data.ca\.crt}' | base64 -d > k3s-ca.pem
-
-# 2. 分发到客户端信任存储
-#    Windows: certutil -addstore -f Root k3s-ca.pem
-#    Linux:   cp k3s-ca.pem /etc/pki/ca-trust/source/anchors/ && update-ca-trust
-#    macOS:   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain k3s-ca.pem
-
-# 3. 验证信任链（不再需要 --insecure）
-curl -vI https://shortlink.internal/health    # TLS 握手成功，无证书警告
-```
-
-#### Step 5 验证
-
-```bash
-# cert-manager Pod 就绪
-kubectl get pods -n cert-manager
-
-# 两阶段 Issuer Ready
-kubectl get clusterissuer selfsigned-issuer   # READY=True
-kubectl get clusterissuer ca-issuer           # READY=True
-kubectl get certificate k3s-root-ca -n cert-manager  # READY=True（根 CA）
-
-# 服务证书签发（首次约 10-30s）
-kubectl get certificate -n app-layer          # READY=True
-kubectl get secret shortlink-tls -n app-layer # 存在
-
-# HTTPS 访问（需已导入 CA 公钥，或用 --cacert）
-curl -vI https://shortlink.internal/health                     # 200, 含 TLS 握手
-curl -vI --cacert k3s-ca.pem https://shortlink.internal/health  # 或指定 CA 文件
-curl -I  http://192.168.1.228/health                           # 仍可用（健康检查 Ingress）
-
-# 续签验证
-kubectl describe certificate shortlink-tls -n app-layer | grep "Renewal"
-```
-
-#### Step 6 文件影响
-
-| 类型 | 文件 |
-|------|------|
-| 新建 | `clusters/production/cert-manager-install.yaml`、`k8s/cert-manager/namespace.yaml`、`k8s/cert-manager/clusterissuer-selfsigned.yaml`、`k8s/cert-manager/clusterissuer-ca.yaml`、`clusters/production/cert-manager.yaml` |
-| 修改 | `k8s/app-layer/ingress.yaml` |
+> **可选增强**：配置 Traefik `middlewares.traefik.io` 的 `redirectscheme` 中间件，将 HTTP `:80` 自动 301 跳转到 HTTPS。当前两套 Ingress 并存，HTTP 和 HTTPS 均可访问。
 
 ---
 
@@ -306,84 +325,119 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
 ========================================
 ```
 
-#### Step 2 新建 Ansible 部署 playbook
+#### 实际部署
 
-**新建文件**：`ansible/playbooks/08-db-inspect.yml`
+**部署方式**：由于 Ansible 控制节点不在开发机上，脚本通过 SSH jump 直接拷贝到 node-03：
 
-职责：
-1. 将 `scripts/db-inspect.sh` 拷贝到 node-03 `/usr/local/bin/`，`mode: 0755`
-2. 确保 node-03 上 `/root/.my.cnf` 存在（MySQL 客户端凭证，`[client]` 段）
-3. 确保 `ossutil` 已安装（Phase 7 已装，playbook 用 `command: which ossutil` 幂等检查）
-4. 添加 cron：`0 2 * * 0 /usr/local/bin/db-inspect.sh >> /var/log/db-inspect.log 2>&1`（`ansible.builtin.cron` 模块，`name: mysql-inspect`）
+```bash
+# 拷贝脚本
+cat scripts/db-inspect.sh | ssh -J k3s-node-01 ops@192.168.1.229 \
+  "sudo tee /usr/local/bin/db-inspect.sh > /dev/null && sudo chmod 755 /usr/local/bin/db-inspect.sh"
 
-遵循现有 playbook 约定（`become: true`、`serial: 1`、幂等 `changed_when`/`when` 守卫）。
+# 注册 cron（每周日 02:00）
+ssh -J k3s-node-01 ops@192.168.1.229 \
+  'sudo crontab -l 2>/dev/null | grep -q db-inspect || \
+    (sudo crontab -l 2>/dev/null; echo "0 2 * * 0 /usr/local/bin/db-inspect.sh >> /var/log/db-inspect.log 2>&1") | \
+    sudo crontab -'
+```
+
+**Ansible playbook** `ansible/playbooks/08-db-inspect.yml` 已编写完成，当 Ansible 控制节点可用时可直接使用，功能一致。
 
 > 巡检脚本的 OSS 配置（bucket/prefix/endpoint）均通过 `${VAR:-default}` 内置默认值，与 Phase 7 xtrabackup 脚本复用同一套 OSS 参数，无需额外修改 `all.yml.example`。
 
-#### Step 3 验证
+#### 验证结果
 
 ```bash
-# 手动执行（dry-run 不可用时直接跑一次）
-ssh k3s-node-03 "sudo /usr/local/bin/db-inspect.sh"
-# 或本地拷贝后执行
-scp scripts/db-inspect.sh k3s-node-03:/tmp/ && ssh k3s-node-03 "sudo mv /tmp/db-inspect.sh /usr/local/bin/ && sudo chmod 755 /usr/local/bin/db-inspect.sh && sudo /usr/local/bin/db-inspect.sh"
+# 手动执行（dry-run）
+sudo /usr/local/bin/db-inspect.sh --dry-run
 
-# 检查报告生成
-ssh k3s-node-03 "cat /var/log/mysql-inspect/mysql-inspect-*.txt | head -30"
+# 手动执行（仅生成报告，不推送 OSS）
+sudo /usr/local/bin/db-inspect.sh --local
+# Output:
+#   Report generated (local-only): /var/log/mysql-inspect/mysql-inspect-20260728-134605.txt
+#   101 /var/log/mysql-inspect/mysql-inspect-20260728-134605.txt
 
-# 检查 OSS 推送
+# 手动执行（全量，含 OSS 推送）
+sudo /usr/local/bin/db-inspect.sh
+# Output:
+#   --- Pushing report to OSS: k3s-backup-velero/mysql-inspect/ ---
+#   Succeed: Total num: 1, size: 6,767. OK num: 1(upload 1 files).
+#   OSS location: oss://k3s-backup-velero/mysql-inspect/mysql-inspect-20260728-134749.txt
+
+# 检查报告内容
+cat /var/log/mysql-inspect/mysql-inspect-20260728-134605.txt | head -30
+
+# 检查 OSS 文件
 ossutil ls oss://k3s-backup-velero/mysql-inspect/
 
-# 检查 cron 注册
-ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
+# 检查 cron
+sudo crontab -l | grep db-inspect
+# 0 2 * * 0 /usr/local/bin/db-inspect.sh >> /var/log/db-inspect.log 2>&1
 ```
 
-#### Step 4 文件影响
+**实际输出示例**（2026-07-28 巡检报告摘要）：
 
-| 类型 | 文件 |
-|------|------|
-| 新建 | `scripts/db-inspect.sh`、`ansible/playbooks/08-db-inspect.yml` |
+| 检测项 | 结果 |
+|--------|------|
+| MySQL 版本 | 8.0.46 |
+| 运行时间 | 20 小时 |
+| 复制状态 | ✅ IO/SQL Running, 延迟 0s |
+| 主库地址 | 192.168.1.230 (node-02) |
+| 总数据量 | 1.36 MB |
+| 最大表 | orchestrator.topology_recovery (0.13 MB) |
+| 碎片 >30% | 无 ✅ |
+| Buffer Pool 命中率 | 99.99% |
+| 活跃连接 | 8 / 100 |
+| 近 7 天 ERROR 日志 | 3 条（均为历史复制错误，已恢复） |
+| 告警 | 无 ✅ |
+
+#### 文件影响
+
+| 类型 | 文件 | 说明 |
+|------|------|------|
+| 新建 | `scripts/db-inspect.sh` | 7 维度巡检脚本（101 行报告输出） |
+| 新建 | `ansible/playbooks/08-db-inspect.yml` | Ansible 部署 playbook（待接入 Ansible 控制节点后使用） |
 
 ---
 
 ## 5. 受影响文件总览
 
-### 新建文件（7 个）
+### 新建文件（5 个）
 
 | 文件路径 | 模块 | 说明 |
 |---------|------|------|
-| `clusters/production/cert-manager-install.yaml` | 1 | HelmRepository + HelmRelease 安装 cert-manager（镜像源覆盖为国内镜像） |
-| `k8s/cert-manager/namespace.yaml` | 1 | cert-manager namespace |
-| `k8s/cert-manager/clusterissuer-selfsigned.yaml` | 1 | selfSigned ClusterIssuer + 根 CA Certificate（10 年） |
+| `k8s/cert-manager/namespace.yaml` | 1 | cert-manager namespace（含 disable-validation 注解） |
+| `k8s/cert-manager/clusterissuer-selfsigned.yaml` | 1 | selfSigned ClusterIssuer + 根 CA Certificate（ECDSA, 10 年） |
 | `k8s/cert-manager/clusterissuer-ca.yaml` | 1 | CA ClusterIssuer（用根 CA 签服务证书） |
-| `clusters/production/cert-manager.yaml` | 1 | FluxCD Kustomization |
 | `scripts/db-inspect.sh` | 2 | 数据库巡检脚本 |
 | `ansible/playbooks/08-db-inspect.yml` | 2 | Ansible 部署 playbook |
 
-### 修改文件（2 个）
+> **相比原计划减少 2 个文件**：`clusters/production/cert-manager-install.yaml` 和 `clusters/production/cert-manager.yaml` 因 FluxCD 已缩至 0 未创建，改用手动 Helm install + kubectl apply。
+
+### 修改文件（1 个）
 
 | 文件路径 | 模块 | 变更内容 |
 |---------|------|---------|
-| `k8s/app-layer/ingress.yaml` | 1 | 拆分主/健康 Ingress，添加 TLS + cert-manager annotation |
-| `README.md` | 全 | Phase 8 路线图状态更新 |
+| `k8s/app-layer/ingress.yaml` | 1 | 拆分为短链主 Ingress（TLS + shortlink.internal）+ 健康检查 Ingress（HTTP IP 访问） |
 
-## 6. 部署顺序与回滚
+> **README.md**：状态标记已在 Phase 7 提交时更新为「进行中」，本次完成后需手动标记为「已发布」。
 
-### 推荐部署顺序
+## 6. 实际部署顺序与回滚
+
+### 实际执行顺序
 
 ```
 Phase 1 (HTTPS):
-  1. 部署 cert-manager-install (HelmRelease) → 等待 CRD + Pod Ready
-  2. 部署 cert-manager Kustomization (namespace + selfSigned Issuer + 根 CA Cert + CA Issuer)
-  3. 修改 ingress.yaml (TLS + ca-issuer annotation) → 验证证书签发
-  4. 配置内网 DNS 解析 (hosts / CoreDNS)
-  5. 导出根 CA 公钥并分发到客户端信任存储
-  6. 验证 HTTPS 访问 + 健康检查 Ingress 仍可用 (IP 裸访问)
+  1. 安装 Helm CLI → helm repo add jetstack → helm install cert-manager
+  2. kubectl apply ClusterIssuer (selfsigned-issuer → k3s-root-ca → ca-issuer)
+  3. 修改 ingress.yaml (TLS + ca-issuer annotation)
+  4. 验证证书签发 + HTTPS 访问
+  5. 导出根 CA 公钥 (k3s-ca.pem) → 分发到客户端信任存储
 
 Phase 2 (巡检):
-  7. 编写 db-inspect.sh + 08-db-inspect.yml
-  8. Ansible 部署到 node-03 + 注册 cron
-  9. 手动执行验证报告生成 + OSS 推送
+  6. 编写 scripts/db-inspect.sh + ansible/playbooks/08-db-inspect.yml
+  7. SSH 部署到 node-03 + 注册 cron (每周日 02:00)
+  8. 手动执行验证报告生成 + OSS 推送
 ```
 
 > 两个模块无相互依赖，可单独执行、单独回滚。
@@ -392,27 +446,31 @@ Phase 2 (巡检):
 
 | 模块 | 回滚方式 |
 |------|---------|
-| 1 cert-manager | `kubectl delete -f` 安装资源 + 还原 ingress.yaml 为 HTTP-only；证书 Secret 残留无副作用 |
-| 2 巡检 | `ansible` 删除 cron + 脚本；或停用 cron 任务 `crontab -r`（针对性） |
+| 1 cert-manager | `helm uninstall cert-manager -n cert-manager` + `kubectl delete -f k8s/cert-manager/` + 还原 ingress.yaml 为 HTTP-only；证书 Secret 残留无副作用 |
+| 2 巡检 | 停止 cron：`crontab -l \| grep -v db-inspect \| crontab -`；删除脚本：`rm /usr/local/bin/db-inspect.sh` |
 
-## 7. 风险与注意事项
+## 7. 实际风险与注意事项
 
-| 模块 | 风险 | 影响 | 缓解措施 |
-|------|------|------|---------|
-| 1 | 自签 CA 证书默认不受客户端信任 | 浏览器/curl 报「不安全」 | Step 4 导出根 CA 公钥并分发到客户端信任存储 |
-| 1 | 内网域名无法公网解析 | Traefik Host 路由失效 | Step 3 配置 hosts / CoreDNS / dnsmasq 内网解析 |
-| 1 | cert-manager 镜像 `quay.io` 国内不可达 | 安装失败 | HelmRelease values 覆盖 image 为国内镜像源（daocloud） |
-| 1 | cert-manager 自举死锁（webhook 校验自身） | 安装卡住 | namespace 加 `cert-manager.io/disable-validation: true` |
-| 1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
-| 1 | 根 CA 到期需手动更换（10 年） | 所有客户端需重新导入 CA | 文档记录 CA 指纹；到期前手动续签并重新分发 |
-| 2 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
+| # | 模块 | 风险 | 影响 | 缓解措施 |
+|---|------|------|------|---------|
+| 1 | 1 | **cert-manager pod 调度到无网络的 node-02/03** | ImagePullBackOff，安装卡住 | 必须设置 `nodeSelector: kubernetes.io/hostname=node-01` |
+| 2 | 1 | **daocloud quay.m.daocloud.io 超时**（从 node-02/03） | 镜像拉取失败 | 强制调度到 node-01 + 使用国内镜像 |
+| 3 | 1 | 自签 CA 证书默认不受客户端信任 | 浏览器/curl 报「不安全」 | 导出根 CA 公钥并分发到客户端信任存储 |
+| 4 | 1 | 内网域名无法公网解析 | Traefik Host 路由失效 | 配置 hosts / CoreDNS / dnsmasq 内网解析 |
+| 5 | 1 | cert-manager 自举死锁（webhook 校验自身） | 安装卡住 | namespace 加 `cert-manager.io/disable-validation: true` |
+| 6 | 1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
+| 7 | 1 | 根 CA 到期需手动续签（10 年） | 所有客户端需重新导入 CA | 文档记录 CA 指纹；到期前手动续签并重新分发 |
+| 8 | 2 | **SHOW REPLICA STATUS\G 配合 mysql -N 丢失字段名** | 复制状态解析为空 | 改用 `${MYSQL_CMD} -e`（去掉 -N）查询，awk -F': ' 解析 \G 输出 |
+| 9 | 2 | `column` 命令不存在 | TOP 10 大表格式化失败 | 脚本已用 `|| true` 容错 |
+| 10 | 2 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
 
 ## 8. 增强前后对比
 
 | 维度 | 增强前 | 增强后 |
 |------|--------|--------|
 | 传输安全 | HTTP 明文 `:80` | HTTPS `:443` + cert-manager 自动续签 |
-| 证书管理 | 无 | selfSigned 根 CA（10 年）+ CA Issuer 签服务证书（1 年自动 Renew） |
-| 数据库可观测 | 人工排查 | 每周结构化巡检报告 + OSS 趋势留存 |
+| 证书管理 | 无 | selfSigned 根 CA（10 年）+ CA Issuer 签服务证书（90 天自动 Renew） |
+| 数据库可观测 | 人工排查 | 每周结构化巡检报告 + OSS 趋势留存 (`oss://k3s-backup-velero/mysql-inspect/`) |
 | 域名访问 | 仅 IP | 内网域名 + 自签证书（需导入 CA 公钥后可演示 https） |
+| 集群入口 | 单一 HTTP Ingress | HTTP 健康检查 + HTTPS 服务共存 |
 
