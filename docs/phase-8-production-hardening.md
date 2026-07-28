@@ -1,18 +1,19 @@
-# Phase 8：生产级加固（HTTPS + 密钥外置 + 巡检自动化）
+# Phase 8：生产级加固（HTTPS + 巡检自动化）
 
 ## 1. 概述
 
-将 `docs/project-future-expansion.md` 中标记为「✅ 已做」的 3 个规划项正式落地为 Phase 8，覆盖**传输安全**、**密钥管理**、**运维自动化**三大生产级能力：
+将 `docs/project-future-expansion.md` 中标记为「✅ 已做」的规划项正式落地为 Phase 8，覆盖**传输安全**、**运维自动化**两大生产级能力：
 
 | 模块 | 来源规划 | 原 P 级 | 核心价值 |
 |------|---------|--------|---------|
 | Phase 1 | HTTPS + cert-manager | P0 | 全链路加密，自动续签，消除"学生玩具"观感 |
-| Phase 2 | External Secrets Operator | P0 | Secrets 纳入 GitOps，补齐全声明式最后一块拼图 |
-| Phase 3 | 数据库自动巡检脚本 | P1 | 日常运维自动化意识，可展示的结构化巡检报告 |
+| Phase 2 | 数据库自动巡检脚本 | P1 | 日常运维自动化意识，可展示的结构化巡检报告 |
+
+> **原规划的 ESO（External Secrets Operator）模块已移除**：ESO 官方支持的 48 个 provider 中不包含阿里云（Alibaba/AliCloud），无法直接对接阿里云 Secrets Manager。当前 `secret.yaml` 已 gitignored + `.example` 模板入库，安全性已满足项目要求，故放弃 ESO 模块。
 
 **状态：计划已就绪，待执行**（本文档仅规划，不实际修改集群）
 
-## 2. 三模块架构总览
+## 2. 两模块架构总览
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -25,28 +26,28 @@
                 │  cert-manager 注入证书    │
                 └───────────┬────────────┘
                             │
-        ┌───────────────────┼───────────────────────────┐
-        │                   │                            │
-┌───────▼──────┐   ┌────────▼─────────┐         ┌────────▼────────┐
-│  app-layer   │   │  cert-manager    │         │ external-secrets│
-│ shortlink    │   │  (selfSigned →   │         │  (data-layer    │
-│ (:8080 TLS)  │   │   根CA → CA      │         │   SecretStore + │
-│              │   │   Issuer → Cert) │         │   ExternalSecret)│
-└───────┬──────┘   └────────┬─────────┘         └────────┬────────┘
-        │                   │                            │
-        │           ┌───────▼────────┐          ┌────────▼────────┐
-        │           │ 自签根 CA       │          │ 阿里云 Secrets  │
-        │           │ (10年/公钥分发) │          │  Manager (云上) │
-        │           └────────────────┘          └─────────────────┘
-        │
-        ▼  MySQL 访问
-┌──────────────────────────────────┐
-│  物理机 MySQL (node-02/03)         │  ◄── Phase 3 巡检脚本 (cron, node-03)
-│  脚本输出报告 → ossutil → OSS      │
-└──────────────────────────────────┘
+        ┌───────────────────┼───────────────────────────────┐
+        │                   │                                │
+┌───────▼──────┐   ┌────────▼─────────┐              ┌──────▼──────────┐
+│  app-layer   │   │  cert-manager    │              │ Phase 2 巡检脚本 │
+│ shortlink    │   │  (selfSigned →   │              │ (cron, node-03)  │
+│ (:8080 TLS)  │   │   根CA → CA      │              │                  │
+│              │   │   Issuer → Cert) │              │                  │
+└───────┬──────┘   └────────┬─────────┘              └──────┬───────────┘
+        │                   │                               │
+        │           ┌───────▼────────┐                     │
+        │           │ 自签根 CA       │                     │
+        │           │ (10年/公钥分发) │                     │
+        │           └────────────────┘                     │
+        │                                                  │
+        ▼  MySQL 访问                                       ▼
+┌──────────────────────────────────┐               ┌───────────────────┐
+│  物理机 MySQL (node-02/03)         │◄──────────────│ 巡检报告 → ossutil │
+│                                  │    只读查询     │ → OSS (趋势留存)   │
+└──────────────────────────────────┘               └───────────────────┘
 ```
 
-**三模块关系**：cert-manager（自签 CA 两阶段签发）解决"传输加密"；external-secrets 解决"密钥来源外置"；巡检脚本解决"数据库日常可观测"。三者互不依赖，可独立部署，但均纳入 GitOps 体系管理。
+**两模块关系**：cert-manager（自签 CA 两阶段签发）解决"传输加密"；巡检脚本解决"数据库日常可观测"。两者互不依赖，可独立部署，但均纳入 GitOps 体系管理。
 
 > **与原计划的关键差异**：因域名仅用于内网验证，不使用公网 CA（Let's Encrypt ACME 需公网 DNS + `:80` 可达，内网无法满足），改用 cert-manager selfSigned Issuer 签发私有根 CA，再由 CA Issuer 签发服务证书。客户端需手动导入根 CA 公钥以建立信任链。
 
@@ -55,15 +56,13 @@
 | # | 模块 | 当前状态 | 缺口 |
 |---|------|---------|------|
 | 1 | 传输安全 | 仅 HTTP `:80` 暴露，Ingress 无 TLS | 明文传输，无证书管理 |
-| 2 | 密钥管理 | 手动 `kubectl create secret` + `.gitignore` 屏蔽 secret.yaml | Secrets 不在 GitOps 内，重建易丢 |
-| 3 | 数据库运维 | 无自动巡检，靠人工排查 | 无趋势数据、无告警基线 |
+| 2 | 数据库运维 | 无自动巡检，靠人工排查 | 无趋势数据、无告警基线 |
 
 **关键约束**：
 - K3s 内置 Traefik 默认有 `web` (`:80`) 和 `websecure` (`:443`) 两个 entrypoint；`websecure` 需证书才能生效。
 - **域名仅用于内网验证**，不对外提供服务，无需 ICP 备案、无需公网 DNS。使用内网域名 `shortlink.internal`，通过客户端 `/etc/hosts` 或 CoreDNS hosts 插件解析到 `192.168.1.228`（node-01 内网 IP）。
 - **不使用公网 CA**：Let's Encrypt ACME 验证要求公网 DNS + `:80` 公网可达，内网域名无法满足。改用 cert-manager selfSigned Issuer 签发私有根 CA（10 年），再由 CA Issuer 签发服务证书（1 年，自动续签）。
 - 客户端需手动导入根 CA 公钥到系统信任存储，否则浏览器/curl 报「不信任」错误。
-- ESO 云上后端选**阿里云 Secrets Manager**（免费额度足够，与现有 ACR/OSS 同账号体系）。
 - 巡检脚本复用 Phase 7 已安装的 `ossutil`，报告推送同一 OSS bucket。
 
 ---
@@ -239,117 +238,7 @@ kubectl describe certificate shortlink-tls -n app-layer | grep "Renewal"
 
 ---
 
-### 4.2 Phase 2 — External Secrets Operator
-
-**目标**：将 K8s Secret 的真正内容外置到**阿里云 Secrets Manager**，Git 仓库仅保留 `ExternalSecret` CR（声明"同步哪些密钥"），ESO 控制器负责拉取并渲染为 K8s Secret。补齐 GitOps 全声明式的最后一块拼图。
-
-#### Step 1 安装 ESO（GitOps 优先）
-
-**新建文件**：
-
-| 文件 | 内容 |
-|------|------|
-| `clusters/production/external-secrets-install.yaml` | `HelmRepository`（external-secrets chart repo）+ `HelmRelease`（external-secrets） |
-| `k8s/external-secrets/namespace.yaml` | `external-secrets` namespace |
-| `k8s/external-secrets/secretstore-aliyun.yaml` | `SecretStore`（alibaba provider，指向 Secrets Manager，region `cn-hangzhou`） |
-| `k8s/external-secrets/externalsecret-mysql.yaml` | `ExternalSecret` `mysql-credentials`（映射 5 个 key → data-layer/mysql-credentials） |
-| `clusters/production/external-secrets.yaml` | FluxCD `Kustomization`（path `./k8s/external-secrets`，`dependsOn` external-secrets-install） |
-
-#### Step 2 SecretStore 与 ExternalSecret 关键字段
-
-```yaml
-# SecretStore — 阿里云认证（ESO 自身 bootstrap 密钥）
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: aliyun-secretstore
-  namespace: data-layer
-spec:
-  provider:
-    alibaba:
-      region: cn-hangzhou
-      auth:
-        secretRef:
-          accessKeyID:
-            name: aliyun-eso-auth        # ← 手动创建的 bootstrap Secret
-            key: accessKeyID
-          accessKeySecret:
-            name: aliyun-eso-auth
-            key: accessKeySecret
----
-# ExternalSecret — 同步 MySQL 凭证
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: mysql-credentials
-  namespace: data-layer
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aliyun-secretstore
-    kind: SecretStore
-  target:
-    name: mysql-credentials             # 渲染出的 K8s Secret 名（与现有引用一致）
-  data:
-    - secretKey: monitor-password
-      remoteRef: { key: /k3s/mysql/monitor-password }
-    - secretKey: shortlink-password
-      remoteRef: { key: /k3s/mysql/shortlink-password }
-    - secretKey: orchestrator-password
-      remoteRef: { key: /k3s/mysql/orchestrator-password }
-    - secretKey: proxysql-admin-password
-      remoteRef: { key: /k3s/mysql/proxysql-admin-password }
-    - secretKey: proxysql-radmin-password
-      remoteRef: { key: /k3s/mysql/proxysql-radmin-password }
-```
-
-#### Step 3 密钥迁移步骤
-
-1. **创建 RAM 子账号**：仅授予 Secrets Manager 读权限（`AliyunRAMReadOnlyAccess` 不必要，用自定义策略限定 `kms:Decrypt` + `secretsmanager:GetSecretValue`）。
-2. **在 Secrets Manager 写入 5 个密钥**：路径 `/k3s/mysql/*`，值来自 `group_vars/all.yml`（gitignored）的现有密码。
-3. **手动创建 bootstrap Secret** `aliyun-eso-auth`（ESO 自身认证用，不能由 ESO 管理）：
-   ```bash
-   kubectl create secret generic aliyun-eso-auth -n data-layer \
-     --from-literal=accessKeyID='<RAM_AK>' \
-     --from-literal=accessKeySecret='<RAM_SK>'
-   ```
-4. **从 GitOps 移除静态 secret.yaml**：删除 `k8s/data-layer/kustomization.yaml` 中 `- secret.yaml` 引用，避免与 ESO 渲染的 Secret 冲突（`prune: true` 会误删）。保留 `secret.yaml.example` 作为模板参考。
-5. **部署 ESO + ExternalSecret**，验证 `mysql-credentials` 被自动重建。
-
-**修改文件**：
-- `k8s/data-layer/kustomization.yaml` — 移除 `secret.yaml` 资源引用
-- `ansible/group_vars/all.yml`（gitignored）+ `all.yml.example` — 新增 `aliyun_esm_access_key_id` / `aliyun_esm_access_key_secret` 变量（供文档与 RAM 配置参考）
-
-#### Step 4 验证
-
-```bash
-# ESO 控制器就绪
-kubectl get pods -n external-secrets
-
-# ExternalSecret 同步成功
-kubectl get externalsecret -n data-layer    # READY=True
-kubectl get secret mysql-credentials -n data-layer   # 被 ESO 重建
-
-# 破坏性验证：删除 Secret → ESO 自动重建
-kubectl delete secret mysql-credentials -n data-layer
-sleep 10
-kubectl get secret mysql-credentials -n data-layer   # 已重建
-
-# 业务功能不受影响
-curl http://192.168.1.228/health   # {"status":"ok"}
-```
-
-#### Step 5 文件影响
-
-| 类型 | 文件 |
-|------|------|
-| 新建 | `clusters/production/external-secrets-install.yaml`、`k8s/external-secrets/namespace.yaml`、`k8s/external-secrets/secretstore-aliyun.yaml`、`k8s/external-secrets/externalsecret-mysql.yaml`、`clusters/production/external-secrets.yaml` |
-| 修改 | `k8s/data-layer/kustomization.yaml`、`ansible/group_vars/all.yml.example` |
-| 移除（出 GitOps） | `k8s/data-layer/secret.yaml`（保留 `.example`） |
-
----
-
-### 4.3 Phase 3 — 数据库自动巡检脚本
+### 4.2 Phase 2 — 数据库自动巡检脚本
 
 **目标**：在 MySQL Slave（node-03）上以 cron 每周执行一次结构化巡检，覆盖空间/碎片/慢查询/复制/连接/性能/错误日志 7 个维度，报告经 `ossutil` 推送 OSS，形成可对比的趋势基线。
 
@@ -368,7 +257,7 @@ curl http://192.168.1.228/health   # {"status":"ok"}
 set -euo pipefail
 
 MYSQL_USER="${MYSQL_USER:-root}"
-MYSQL_PASSWORD="${MYSQL_PASSWORD:-CHANGE_ME}"   # 从 /root/.my.cnf 读取
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"   # 密码由 /root/.my.cnf [client] 提供
 OSS_BUCKET="${OSS_BUCKET:-k3s-backup-velero}"
 OSS_PREFIX="${OSS_PREFIX:-mysql-inspect}"
 OSSUTIL_BIN="${OSSUTIL_BIN:-/usr/local/bin/ossutil}"
@@ -404,7 +293,7 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
  节点: k3s-node-03 (Slave)
 ========================================
 [基础信息]
- MySQL 版本: 0.46
+ MySQL 版本: 8.0.46
  运行时间: 30 天 4 小时
  复制状态: ✅ IO 线程 Running, SQL 线程 Running
  复制延迟: 0 秒
@@ -433,7 +322,7 @@ echo "Inspection report pushed: oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${
 
 遵循现有 playbook 约定（`become: true`、`serial: 1`、幂等 `changed_when`/`when` 守卫）。
 
-**修改文件**：`ansible/group_vars/all.yml`（gitignored）+ `all.yml.example` — 若需新增巡检相关变量（如 `db_inspect_oss_prefix`），补充到 OSS 配置段。
+> 巡检脚本的 OSS 配置（bucket/prefix/endpoint）均通过 `${VAR:-default}` 内置默认值，与 Phase 7 xtrabackup 脚本复用同一套 OSS 参数，无需额外修改 `all.yml.example`。
 
 #### Step 3 验证
 
@@ -458,13 +347,12 @@ ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
 | 类型 | 文件 |
 |------|------|
 | 新建 | `scripts/db-inspect.sh`、`ansible/playbooks/08-db-inspect.yml` |
-| 修改 | `ansible/group_vars/all.yml.example` |
 
 ---
 
 ## 5. 受影响文件总览
 
-### 新建文件（11 个）
+### 新建文件（7 个）
 
 | 文件路径 | 模块 | 说明 |
 |---------|------|------|
@@ -473,22 +361,14 @@ ssh k3s-node-03 "sudo crontab -l | grep db-inspect"
 | `k8s/cert-manager/clusterissuer-selfsigned.yaml` | 1 | selfSigned ClusterIssuer + 根 CA Certificate（10 年） |
 | `k8s/cert-manager/clusterissuer-ca.yaml` | 1 | CA ClusterIssuer（用根 CA 签服务证书） |
 | `clusters/production/cert-manager.yaml` | 1 | FluxCD Kustomization |
-| `clusters/production/external-secrets-install.yaml` | 2 | HelmRepository + HelmRelease 安装 ESO |
-| `k8s/external-secrets/namespace.yaml` | 2 | external-secrets namespace |
-| `k8s/external-secrets/secretstore-aliyun.yaml` | 2 | SecretStore（阿里云） |
-| `k8s/external-secrets/externalsecret-mysql.yaml` | 2 | ExternalSecret（MySQL 凭证） |
-| `clusters/production/external-secrets.yaml` | 2 | FluxCD Kustomization |
-| `scripts/db-inspect.sh` | 3 | 数据库巡检脚本 |
-| `ansible/playbooks/08-db-inspect.yml` | 3 | Ansible 部署 playbook |
+| `scripts/db-inspect.sh` | 2 | 数据库巡检脚本 |
+| `ansible/playbooks/08-db-inspect.yml` | 2 | Ansible 部署 playbook |
 
-### 修改文件（5 个）
+### 修改文件（2 个）
 
 | 文件路径 | 模块 | 变更内容 |
 |---------|------|---------|
 | `k8s/app-layer/ingress.yaml` | 1 | 拆分主/健康 Ingress，添加 TLS + cert-manager annotation |
-| `k8s/data-layer/kustomization.yaml` | 2 | 移除 `secret.yaml` 引用（ESO 接管） |
-| `ansible/group_vars/all.yml.example` | 2 / 3 | 新增 ESM + 巡检相关变量说明 |
-| `k8s/data-layer/secret.yaml` | 2 | 移出 GitOps 管理（保留 `.example`） |
 | `README.md` | 全 | Phase 8 路线图状态更新 |
 
 ## 6. 部署顺序与回滚
@@ -504,28 +384,20 @@ Phase 1 (HTTPS):
   5. 导出根 CA 公钥并分发到客户端信任存储
   6. 验证 HTTPS 访问 + 健康检查 Ingress 仍可用 (IP 裸访问)
 
-Phase 2 (ESO):
-  7. 创建 RAM 子账号 + Secrets Manager 写入 5 密钥
-  8. 手动创建 bootstrap Secret aliyun-eso-auth
-  9. 部署 external-secrets-install (HelmRelease)
-  10. 部署 external-secrets Kustomization (SecretStore + ExternalSecret)
-  11. 修改 data-layer/kustomization.yaml 移除 secret.yaml → 验证 ESO 重建 Secret
-
-Phase 3 (巡检):
-  12. 编写 db-inspect.sh + 08-db-inspect.yml
-  13. Ansible 部署到 node-03 + 注册 cron
-  14. 手动执行验证报告生成 + OSS 推送
+Phase 2 (巡检):
+  7. 编写 db-inspect.sh + 08-db-inspect.yml
+  8. Ansible 部署到 node-03 + 注册 cron
+  9. 手动执行验证报告生成 + OSS 推送
 ```
 
-> 三个模块无相互依赖，可单独执行、单独回滚。
+> 两个模块无相互依赖，可单独执行、单独回滚。
 
 ### 回滚策略
 
 | 模块 | 回滚方式 |
 |------|---------|
 | 1 cert-manager | `kubectl delete -f` 安装资源 + 还原 ingress.yaml 为 HTTP-only；证书 Secret 残留无副作用 |
-| 2 ESO | `kubectl delete externalsecret`；还原 `data-layer/kustomization.yaml` 加回 `secret.yaml`；手动 `kubectl apply -f secret.yaml` 恢复静态 Secret |
-| 3 巡检 | `ansible` 删除 cron + 脚本；或停用 cron 任务 `crontab -r`（针对性） |
+| 2 巡检 | `ansible` 删除 cron + 脚本；或停用 cron 任务 `crontab -r`（针对性） |
 
 ## 7. 风险与注意事项
 
@@ -537,20 +409,15 @@ Phase 3 (巡检):
 | 1 | cert-manager 自举死锁（webhook 校验自身） | 安装卡住 | namespace 加 `cert-manager.io/disable-validation: true` |
 | 1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
 | 1 | 根 CA 到期需手动更换（10 年） | 所有客户端需重新导入 CA | 文档记录 CA 指纹；到期前手动续签并重新分发 |
-| 2 | ESO bootstrap Secret 与 ESO 管理的 Secret 同名冲突 | 循环依赖 | bootstrap `aliyun-eso-auth` 单独手动创建，不进 GitOps |
-| 2 | 移除 secret.yaml 后 ESO 未同步成功 | Pod 启动缺 Secret | 先确认 ExternalSecret READY 再移除静态 Secret |
-| 2 | Secrets Manager 不可用 | 无法刷新新版本 | 已有 K8s Secret 不受影响（Operator 缓存），业务无感知 |
-| 3 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
-| 3 | ossutil 未安装 | 报告推送失败 | playbook 幂等检查 `which ossutil`（Phase 7 已装） |
+| 2 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
+| 2 | ossutil 未安装 | 报告推送失败 | playbook 幂等检查 `which ossutil`（Phase 7 已装） |
 
-##  8. 增强前后对比
+## 8. 增强前后对比
 
 | 维度 | 增强前 | 增强后 |
 |------|--------|--------|
 | 传输安全 | HTTP 明文 `:80` | HTTPS `:443` + cert-manager 自动续签 |
 | 证书管理 | 无 | selfSigned 根 CA（10 年）+ CA Issuer 签服务证书（1 年自动 Renew） |
-| 密钥来源 | 手动 `kubectl create` + gitignore | 阿里云 Secrets Manager + ExternalSecret 同步 |
-| GitOps 完整性 | Secrets 不在 Git 内 | 全声明式（ExternalSecret CR 在 Git） |
 | 数据库可观测 | 人工排查 | 每周结构化巡检报告 + OSS 趋势留存 |
 | 域名访问 | 仅 IP | 内网域名 + 自签证书（需导入 CA 公钥后可演示 https） |
 
