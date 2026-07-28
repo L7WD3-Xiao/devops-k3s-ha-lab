@@ -92,7 +92,22 @@
   gather_facts: false
 
   tasks:
-    - name: Create restore temp directory
+    - name: Create restore temp directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /tmp/mysql-restore
+        - /tmp/mysql-restore/backup
+
+    - name: Clean backup directory before extraction
+      file:
+        path: /tmp/mysql-restore/backup/
+        state: absent
+      changed_when: false
+
+    - name: Recreate clean backup directory
       file:
         path: /tmp/mysql-restore/backup
         state: directory
@@ -122,7 +137,7 @@
     - name: Download backup from OSS
       command: >
         /usr/local/bin/ossutil cp "{{ backup_object }}" /tmp/mysql-restore/backup.xbstream.gz
-        -e {{ oss_endpoint }}
+        -f -e {{ oss_endpoint }}
       register: oss_download
       until: oss_download is success
       retries: 3
@@ -139,9 +154,11 @@
         msg: "Downloaded: {{ dl_file.stat.size | filesizeformat }}"
 
     - name: Decompress and extract xbstream
-      shell: >
-        gunzip -c /tmp/mysql-restore/backup.xbstream.gz
-        | xbstream -x -C /tmp/mysql-restore/backup/
+      shell:
+        cmd: |
+          set -o pipefail
+          gunzip -c /tmp/mysql-restore/backup.xbstream.gz \
+            | xbstream -x -C /tmp/mysql-restore/backup/
       register: extract_result
 
     - name: Prepare backup with xtrabackup
@@ -151,10 +168,21 @@
       retries: 2
       delay: 5
 
+    - name: Show xtrabackup prepare output (last 5 lines)
+      debug:
+        msg:
+          - "stdout last 5: {{ prepare_result.stdout_lines[-5:] | default(['(empty)']) }}"
+          - "stderr last 5: {{ prepare_result.stderr_lines[-5:] | default(['(empty)']) }}"
+
     - name: Verify prepare completed OK
-      shell: "{{ prepare_result.stdout | default('') }} | tail -3"
-      changed_when: false
-      failed_when: "'completed OK!' not in prepare_result.stdout"
+      assert:
+        that:
+          - "'completed OK!' in prepare_result.stdout or 'completed OK!' in prepare_result.stderr"
+        fail_msg: >
+          xtrabackup --prepare did not complete successfully.
+          stdout last 5 lines: {{ prepare_result.stdout_lines[-5:] | default(['(empty)']) | join('; ') }}
+          stderr last 5 lines: {{ prepare_result.stderr_lines[-5:] | default(['(empty)']) | join('; ') }}
+        success_msg: "xtrabackup --prepare completed OK"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -163,7 +191,7 @@
 - name: Stop MySQL and backup old datadir
   hosts: node-03
   become: true
-  gather_facts: false
+  gather_facts: true
   serial: 1
 
   tasks:
@@ -209,13 +237,16 @@
 
   tasks:
     - name: Run xtrabackup --copy-back
-      command: xtrabackup --copy-back --target-dir=/tmp/mysql-restore/backup/
+      command: xtrabackup --copy-back --target-dir=/tmp/mysql-restore/backup/ --datadir=/var/lib/mysql
       register: copy_back
 
     - name: Verify copy-back completed OK
       fail:
-        msg: "xtrabackup --copy-back failed. Check output: {{ copy_back.stdout }}"
-      when: "'completed OK!' not in copy_back.stdout"
+        msg: >
+          xtrabackup --copy-back failed.
+          stdout: {{ copy_back.stdout_lines[-3:] | default(['(empty)']) | join('; ') }}
+          stderr: {{ copy_back.stderr_lines[-3:] | default(['(empty)']) | join('; ') }}
+      when: "'completed OK!' not in (copy_back.stdout | default('') + copy_back.stderr | default(''))"
 
     - name: Set MySQL datadir ownership
       file:
@@ -249,9 +280,10 @@
 
     - name: Verify MySQL root login
       command: >
-        mysql -u root -p'{{ mysql_root_password }}' -e "SELECT VERSION();" 2>/dev/null
+        mysql -u root -p'{{ mysql_root_password }}' -e "SELECT VERSION();"
       register: mysql_ver
       changed_when: false
+      failed_when: false
 
     - name: Show MySQL version
       debug:
@@ -259,9 +291,10 @@
 
     - name: List databases
       command: >
-        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW DATABASES;" 2>/dev/null
+        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW DATABASES;"
       register: mysql_databases
       changed_when: false
+      failed_when: false
 
     - name: Show databases
       debug:
@@ -270,7 +303,7 @@
     - name: Check shortlink data
       command: >
         mysql -u root -p'{{ mysql_root_password }}'
-        -e "SELECT COUNT(*) AS total_urls FROM shortlink.urls;" 2>/dev/null
+        -e "SELECT COUNT(*) AS total_urls FROM shortlink.urls;"
       register: mysql_urls
       changed_when: false
       failed_when: false
@@ -292,7 +325,7 @@
     - name: Check current replica status
       command: >
         mysql -u root -p'{{ mysql_root_password }}'
-        -e "SHOW REPLICA STATUS\\G" 2>/dev/null
+        -e "SHOW REPLICA STATUS\\G"
       register: replica_status
       changed_when: false
       failed_when: false
@@ -303,10 +336,17 @@
 
     - name: Stop replica if running
       command: >
-        mysql -u root -p'{{ mysql_root_password }}' -e "STOP REPLICA;" 2>/dev/null
+        mysql -u root -p'{{ mysql_root_password }}' -e "STOP REPLICA;"
       changed_when: false
       failed_when: false
       when: replica_status.stdout is defined and replica_status.stdout | length > 0
+
+    - name: Reset replica metadata (clean slate from restored backup)
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "RESET REPLICA ALL;"
+      register: reset_replica
+      changed_when: reset_replica.rc == 0
+      failed_when: false
 
     - name: Configure replication with GTID auto-positioning
       command: >
@@ -317,13 +357,13 @@
             SOURCE_PASSWORD='{{ mysql_repl_password }}',
             SOURCE_AUTO_POSITION=1,
             GET_SOURCE_PUBLIC_KEY=1;
-        " 2>/dev/null
+        "
       register: change_replica
       changed_when: change_replica.rc == 0
 
     - name: Start replica
       command: >
-        mysql -u root -p'{{ mysql_root_password }}' -e "START REPLICA;" 2>/dev/null
+        mysql -u root -p'{{ mysql_root_password }}' -e "START REPLICA;"
       register: start_replica
       changed_when: start_replica.rc == 0
 
@@ -333,9 +373,10 @@
 
     - name: Verify replication status
       command: >
-        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW REPLICA STATUS\\G" 2>/dev/null
+        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW REPLICA STATUS\\G"
       register: replica_verify
       changed_when: false
+      failed_when: false
 
     - name: Check IO and SQL threads
       shell: >
