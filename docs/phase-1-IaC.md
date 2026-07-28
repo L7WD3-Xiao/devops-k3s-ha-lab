@@ -46,8 +46,8 @@
 | k3s-node-02 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.230 | — | server + etcd |
 | k3s-node-03 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.229 | — | server + etcd |
 
-> node-01 保持 2C2G（仅跑 K3s 控制面 + FluxCD + Velero，不跑 MySQL）。
-> node-02/03 在 Phase 3 前升级到 2C4G（跑 MySQL 物理机主从，2C2G 内存余量 <200MB 有 OOM 风险）。
+> node-01 保持 2C4G（仅跑 K3s 控制面 + FluxCD + Velero，不跑 MySQL）。
+> node-02/03 在 Phase 3 前升级到 2C4G（跑 MySQL 物理机主从，2C4G 内存余量 <200MB 有 OOM 风险）。
 
 ### 2.2 网络拓扑
 
@@ -63,7 +63,7 @@
   │  EIP   │──── SSH ───┼──▶│  │  k3s-node-01│  │ k3s-node-02  │  │      │
   │ 公网IP │  直连 22     │   │  │ 192.168.1.228│  │192.168.1.230│  │      │
   └────────┘            │   │  │ + etcd      │  │ + etcd       │  │      │
-       │ 互联网出口       │   │  │ 2C2G 40G    │  │ 2C4G 40G     │  │      │
+       │ 互联网出口       │   │  │ 2C4G 40G    │  │ 2C4G 40G     │  │      │
        ▼                │   │  └──────┬──────┘  └──────┬───────┘  │      │
   (K3s/镜像下载)         │   │         │   VPC 内网      │          │      │
                         │   │         └───────┬────────┘          │      │
@@ -175,7 +175,7 @@ variable "vswitch_cidr"  { default = "192.168.1.0/24" }
 variable "zone_id"       { default = "cn-hangzhou-h" }
 
 # ── 实例规格 ──
-variable "instance_type"          { default = "ecs.e-c1m1.large" }  # 2C2G, node-01
+variable "instance_type"          { default = "ecs.e-c1m1.large" }  # 2C4G, node-01
 variable "instance_type_upgraded" { default = "ecs.e-c1m2.large" }  # 2C4G, node-02/03
 
 # ── 镜像 ──
@@ -203,7 +203,7 @@ alicloud_vpc.k3s                    ── 新建 VPC
 ├── alicloud_security_group.k3s     ── 安全组
 │   └── alicloud_security_group_rule.* (8 条规则)
 ├── alicloud_ecs_key_pair.k3s       ── SSH 密钥对
-├── alicloud_instance.k3s_node_01   ── ECS node-01 (2C2G, count=create_node_01)
+├── alicloud_instance.k3s_node_01   ── ECS node-01 (2C4G, count=create_node_01)
 ├── alicloud_instance.k3s_node_02   ── ECS node-02 (2C4G, count=create_node_02)
 ├── alicloud_instance.k3s_node_03   ── ECS node-03 (2C4G, count=create_node_03)
 ├── alicloud_eip_address.k3s_node_01        ── EIP (count=create_eip)
@@ -252,7 +252,7 @@ Step 3: node-01 ──────────► ECS + EIP（cloud-init 初始�
 Step 4: node-02/03 ───────► 两台 ECS 纯内网节点
     │
     ▼
-Step 5: 规格升级 ──────────► node-02/03 2C2G → 2C4G（可选，按需执行）
+Step 5: 规格升级 ──────────► node-02/03 2C4G → 2C4G（可选，按需执行）
 ```
 
 ---
@@ -490,12 +490,11 @@ Phase 1 完成后逐项验证：
 
 | 项目 | 月费 | 说明 |
 |------|------|------|
-| ECS ecs.e-c1m1.large × 1 (node-01) | ~45 元 | 2C2G |
-| ECS ecs.e-c1m2.large × 2 (node-02/03) | ~200 元 | 2C4G，升级后 |
+| ECS ecs.e-c1m2.large × 3 | ~300 元 | 2C4G，升级后 |
 | ESSD Entry 40G × 3 | 含在实例费中 | — |
 | EIP (PayByTraffic) | < 1 元 | 0.8 元/GB，仅安装阶段有流量 |
 | VPC / VSwitch / 安全组 / 密钥对 | 免费 | — |
-| **合计** | **~245 元/月** | — |
+| **合计** | **~300 元/月** | — |
 
 > 项目完成后可随时 `terraform destroy` 释放所有资源，停止计费。
 
