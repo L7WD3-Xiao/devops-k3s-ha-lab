@@ -40,80 +40,109 @@
 
 #### 为什么是 P0
 
-当前集群使用 HTTP 暴露服务，面试官第一反应是"没有 HTTPS 的生产集群不算生产"。加上 HTTPS 后项目直接从"学生玩具"升级为"生产级别"，而且 cert-manager + Let's Encrypt 是全自动续签的，运维成本几乎为零。
+当前集群使用 HTTP 暴露服务，面试官第一反应是"没有 HTTPS 的生产集群不算生产"。加上 HTTPS 后项目直接从"学生玩具"升级为"生产级别"，而且 cert-manager 的自动化续签机制保证了证书运维成本几乎为零。
+
+> **与原始规划的关键差异**：因集群仅在内网演示（通过 `shortlink.internal` 域名），无法满足 Let's Encrypt ACME 验证所需的公网 DNS + `:80` 公网可达条件，改用 cert-manager selfSigned Issuer 签发私有根 CA（10 年），再由 CA Issuer 签发服务证书（1 年，到期前 30 天自动 Renew）。
 
 #### 实施思路
 
 | 组件 | 方案 |
 |------|------|
-| 证书管理 | cert-manager v1.16+（Helm 安装） |
-| 证书签发 | Let's Encrypt（免费，90 天有效期，自动续签） |
-| 验证方式 | HTTP-01（通过 Traefik Ingress 暴露 80 端口完成验证） |
-| 域名 | 申请一个廉价域名（约 20-30 元/年），解析 A 记录到集群 EIP |
+| 证书管理 | cert-manager v1.16+（Helm 安装，镜像源覆盖为国内镜像） |
+| 证书签发 | selfSigned → CA Issuer 两阶段签发（私有根 CA 10 年，服务证书 1 年自动续签） |
+| 验证方式 | 内网自签 CA，无需公网验证 |
+| 域名 | 内网域名 `shortlink.internal`（客户端 hosts / CoreDNS 解析），无需公网域名 |
 
 **实施步骤：**
-1. Helm 安装 cert-manager（注意先安装 CRD）
-2. 创建 ClusterIssuer（Let's Encrypt 生产环境 + 备用 staging 环境用于测试）
-3. 修改 Ingress，添加 TLS 配置 + cert-manager annotation
-4. 验证证书签发 + 自动续签
+1. Helm 安装 cert-manager（注意 `installCRDs: true`，镜像源覆盖为 daocloud 国内镜像）
+2. 创建 `selfSigned` ClusterIssuer + 根 CA Certificate（`isCA: true`，10 年）
+3. 创建 `ca` ClusterIssuer（引用根 CA Secret 签发服务证书）
+4. 修改 Ingress：添加 TLS（`cert-manager.io/cluster-issuer: ca-issuer`），同时保留独立健康检查 Ingress（`/health`，无 host，保留 IP 裸访问能力）
+5. 配置内网 DNS 解析（客户端 `/etc/hosts` 或 CoreDNS hosts 插件）
+6. 导出根 CA 公钥并分发到客户端信任存储（否则浏览器/curl 报「不安全」错误）
 
-**配置关键片段：**
+**配置关键片段（两阶段签发）：**
 ```yaml
+# 阶段1：selfSigned Issuer 签发根 CA 证书
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: letsencrypt-prod
+  name: selfsigned-issuer
 spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: your-email@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-key
-    solvers:
-      - http01:
-          ingress:
-            class: traefik
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: k3s-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: k3s-internal-ca
+  duration: 87600h              # 10 年
+  secretName: k3s-root-ca-secret
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+---
+# 阶段2：CA Issuer 用根 CA 签发服务证书
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ca-issuer
+spec:
+  ca:
+    secretName: k3s-root-ca-secret
 ```
 
-Ingress annotation 修改：
+Ingress annotation 修改（主服务 Ingress）：
 ```yaml
 metadata:
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: ca-issuer
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
   tls:
     - hosts:
-        - shortlink.example.com
+        - shortlink.internal
       secretName: shortlink-tls
+  rules:
+    - host: shortlink.internal
+      ...
 ```
 
 #### 面试 Q&A
 
 **Q：你们集群的 HTTPS 是怎么做的？**
 
-我们用 cert-manager + Let's Encrypt 做自动化证书管理。cert-manager 通过 Helm 安装，创建了一个 ClusterIssuer 指向 Let's Encrypt 的 ACME 服务器。在 Ingress 上添加 `cert-manager.io/cluster-issuer` annotation 后，cert-manager 自动向 Let's Encrypt 申请证书并注入到 Ingress。采用 HTTP-01 验证——因为我们的 Traefik Ingress 已经暴露了 80 端口，Let's Encrypt 可以通过公网访问验证服务器控制权。
+我们用 cert-manager 做自动化证书管理。由于集群部署在内网，域名 `shortlink.internal` 无法通过公网 DNS 解析，也就无法使用 Let's Encrypt ACME 验证。所以我们采用了一套两阶段自签方案：先通过 selfSigned ClusterIssuer 签发一个 10 年期的私有根 CA 证书，再以该根 CA 为基础创建一个 CA ClusterIssuer，由它签发一年期的服务证书注入到 Ingress 的 TLS Secret。到期前 30 天 cert-manager 自动 Renew 服务证书，整个流程是自动化的。
 
-**Q：HTTP-01 和 DNS-01 有什么区别？为什么选 HTTP-01？**
+**Q：自签证书客户端不是会报「不安全」吗？**
 
-HTTP-01 通过在 `/.well-known/acme-challenge/` 放置 token 文件来验证域名所有权，要求 80 端口公网可达。DNS-01 通过配置 DNS TXT 记录验证，不需要公网 80 端口，而且可以签发通配符证书（`*.example.com`）。我们选 HTTP-01 是因为 Traefik 已经在监听 80 端口，不需要额外配置云厂商 DNS API，实现更简单。
+确实会。解决方案是导出根 CA 公钥并导入到客户端的系统信任存储。我们在 cert-manager 部署完成后，从 `k3s-root-ca-secret` Secret 中提取 `ca.crt`，分发给演示用的客户端——Windows 用 `certutil -addstore -f Root`，Linux 用 `update-ca-trust`，macOS 用 `security add-trusted-cert`。导入后浏览器/curl 就能正常信任，不再报安全警告。
 
-**Q：Let's Encrypt 证书只有 90 天有效期，过期了怎么办？**
+**Q：为什么不用 Let's Encrypt 公网 CA？**
 
-cert-manager 会在证书到期前 30 天自动触发 Renew。Renew 流程和首次签发一样——重新 HTTP-01 验证 → 签发新证书 → 更新 Secret → Traefik 自动加载。整个过程用户无感知。我们通过 cert-manager 的 `Certificate` 资源状态监控来确认续签是否成功（`Ready=True`）。
+集群域名 `shortlink.internal` 是内网域名，仅供面试演示时在局域网内访问。Let's Encrypt HTTP-01 验证需要域名解析到公网 IP 且 `:80` 公网可达——内网域名无法满足。如果申请公网域名（如 `shortlink.example.com`）并解析到集群 EIP，HTTP-01 验证理论上可行，但会引入额外的域名成本（约 20-30 元/年）和安全暴露面。当前自签方案在内网场景下更合理。
 
 **Q：你们的镜像里需要做什么适配吗？**
 
-需要在 Go 镜像中安装 ca-certificates 包（已经在 Dockerfile 里了），因为短链的 301 重定向目标可能是 HTTPS 站点（如 `https://kubernetes.io`），Go 标准库需要 CA 证书来验证目标站点的 TLS 证书。
+需要在 Go 镜像中安装 ca-certificates 包（已经在 Dockerfile 里了），因为短链的 301 重定向目标可能是 HTTPS 站点（如 `https://kubernetes.io`），Go 标准库需要 CA 证书来验证目标站点的 TLS 证书。这里 CA 用的是操作系统的根证书存储，和集群的自签根 CA 是两个不同的信任链——互不影响。
 
 ---
 
-### 2. External Secrets Operator ✅ 已做
+### 2. External Secrets Operator 📖 了解
 
 #### 为什么是 P0
 
-当前项目的 Secrets 管理方式是"手动 kubectl create + .gitignore 屏蔽"，这是 GitOps 流程的明显缺口。面试官一定会追问"你们 Secrets 怎么管理的？"，当前回答不够有说服力。ESO 把密钥管理纳入 GitOps 体系，补齐了"全声明式"的最后一块拼图。
+当前项目的 Secrets 管理方式是"手动 kubectl create + .gitignore 屏蔽"，这是 GitOps 流程的明显缺口。面试官一定会追问"你们 Secrets 怎么管理的？"ESO 原本定位为补齐"全声明式"的最后一块拼图。
 
-#### 实施思路
+> ⚠️ **ESO 模块已移除**：调查发现 ESO 官方支持的 48 个 provider 中不包含阿里云（Alibaba/AliCloud），无法直接对接阿里云 Secrets Manager。当前 `secret.yaml` 已 gitignored + `.example` 模板入库，安全性已满足项目要求，故放弃 ESO 模块。
+
+#### 实施思路（规划但未落地）
+
+如果使用 ESO，推荐的方案是：
 
 | 组件 | 方案 |
 |------|------|
@@ -128,42 +157,19 @@ cert-manager 会在证书到期前 30 天自动触发 Renew。Renew 流程和首
 4. 编写 ExternalSecret CR（声明要同步的密钥及其到 K8s Secret 的映射）
 5. 验证：删除集群中的 Secret → ESO 自动重建
 
-**ExternalSecret 示例：**
-```yaml
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: mysql-credentials
-  namespace: data-layer
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aliyun-secretstore
-    kind: SecretStore
-  target:
-    name: mysql-credentials
-  data:
-    - secretKey: root-password
-      remoteRef:
-        key: /k3s/mysql/root-password
-    - secretKey: repl-password
-      remoteRef:
-        key: /k3s/mysql/repl-password
-```
-
 #### 面试 Q&A
 
 **Q：你们 Secrets 怎么管理的？GitOps 下 Secrets 算不算配置？**
 
-我们用 External Secrets Operator 管理。Secret 的真正内容不存放在 Git 仓库里，而是放在阿里云 Secrets Manager。Git 仓库里只放 ExternalSecret CR——它声明了"我要从云上同步哪些密钥到 K8s"。ESO 负责执行同步。这样既保持了 GitOps 的全声明式模式（所有 K8s 资源都在 Git 里），又不会把明文密码提交到 Git。
+当前的管理方式是手动 `kubectl create secret` + `.gitignore` 屏蔽 Secret 文件 + `secret.yaml.example` 模板入库。这样做的好处是简单可靠，不会把明文密码提交到 Git。我了解过 External Secrets Operator 的方案——它可以把密钥存在阿里云 Secrets Manager 上，Git 里只放 ExternalSecret CR 声明。但调研后发现 ESO 官方支持的 48 个 provider 中并不包含阿里云，所以暂时没有落地。如果云厂商切换到 AWS/Azure/GCP，ESO 会是首选的 Secrets 管理方案。（可以通过web hook方式）
 
 **Q：如果 Secrets Manager 本身挂了，K8s 里的 Secret 还能用吗？**
 
-可以。ESO 同步过来的 Secret 是持久化的 K8s Secret 对象，即使 Secrets Manager 暂时不可用，已有 Secret 不受影响，Pod 正常运行。只是无法刷新新的 Secret 版本。恢复后 ESO 自动重新同步。这就是 Operator 模式的好处——控制器在内存中有缓存，不会因为后端不可用就导致业务中断。
+可以。ESO 同步过来的 Secret 是持久化的 K8s Secret 对象，即使 Secrets Manager 暂时不可用，已有 Secret 不受影响，Pod 正常运行。只是无法刷新新的 Secret 版本。恢复后 ESO 自动重新同步。
 
 **Q：为什么不直接用 sealed-secrets？**
 
-sealed-secrets 的方案是把加密后的 Secret 放到 Git 里。问题在于密钥轮转时需要重新加密所有 Secret，且加密密钥的管理也是一个问题。ESO 的方式更"云原生"——密钥存在云上，有审计日志、版本管理、自动轮转。中厂生产环境 ESO 是更主流的选择。
+sealed-secrets 的方案是把加密后的 Secret 放到 Git 里。问题在于密钥轮转时需要重新加密所有 Secret，且加密密钥的管理也是一个问题。ESO 的方式更"云原生"——密钥存在云上，有审计日志、版本管理、自动轮转。中厂生产环境 ESO 是更主流的选择，但前提是云厂商在 ESO 的 provider 支持列表中。
 
 ---
 
@@ -177,7 +183,7 @@ sealed-secrets 的方案是把加密后的 Secret 放到 Git 里。问题在于�
 
 #### 实施思路
 
-用 Shell 脚本 + 系统 cron，在 MySQL Slave（node-03）上每周执行一次：
+用 Shell 脚本（`scripts/db-inspect.sh`） + 系统 cron（`0 2 * * 0`，每周日凌晨 2:00），在 MySQL Slave（node-03）上执行。通过 Ansible playbook（`ansible/playbooks/08-db-inspect.yml`）部署脚本 + 注册 cron，报告经 `ossutil` 推送到 OSS（复用 Phase 7 已安装的工具和 bucket）形成趋势基线。
 
 **巡检项：**
 
@@ -443,26 +449,21 @@ CPU 是 Resource 指标，由 metrics-server 提供，反映的是"Pod 用了多
 现在 ───────────────────────────────────────────────► 面试前
 
 第 1 周                    第 2 周                    第 3-4 周
-┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐
-│ HTTPS +      │    │ External     │    │ 数据库巡检脚本        │
-│ cert-manager │    │ Secrets      │    │ (脚本 + cron + 报告)  │
-│ (1-2 天)     │    │ Operator     │    │ (1 天)               │
-│              │    │ (2-3 天)     │    │                      │
-│ 买域名 +     │    │ RAM 授权 +   │    │ Kyverno 研究         │
-│ ClusterIssuer│    │ secret 迁移  │    │ + 策略编写           │
-│ + Ingress 改 │    │ + 验证回滚   │    │ (2-3 天)             │
-└──────────────┘    └──────────────┘    └──────────────────────┘
-                                              │
-                                      ┌───────▼────────┐
-                                      │ Canary Flagger  │
-                                      │ Longhorn 调研    │
-                                      │ (了解即可, 面试  │
-                                      │  用"了解"口径)   │
-                                      └────────────────┘
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────┐
+│ HTTPS +          │    │ 数据库巡检脚本     │    │ Kyverno 研究         │
+│ cert-manager     │    │ (脚本 + cron      │    │ + 策略编写           │
+│ (1-2 天)         │    │  + OSS 推送)      │    │ (2-3 天)             │
+│                  │    │ (1 天)            │    │                      │
+│ 自签 CA 两阶段    │    │                  │    │ ESO 调研 (了解)       │
+│ (selfSigned → CA)│    │ 调研 ESO 可行性   │    │ Flagger 调研          │
+│ + Ingress TLS    │    │ (确认阿里云不在    │    │ Longhorn 调研         │
+│ + CA 分发        │    │  provider 列表)   │    │ (了解即可, 面试       │
+└──────────────────┘    └──────────────────┘    │  用"了解"口径)       │
+                                                └──────────────────────┘
 ```
 
 **最低配置（时间不够只做这些）：** HTTPS + cert-manager ✅ 仅此一项就能让项目从"可以"变成"不错"
 
-**推荐配置（有时间）：** HTTPS + ESO + 自动巡检 + Kyverno 策略 → 面试能讲的深度和广度都够了
+**推荐配置（有时间）：** HTTPS + 自动巡检 + Kyverno 策略 + ESO/Flagger/Longhorn 调研 → 面试能讲的深度和广度都够了
 
-**理想配置（时间充裕）：** 推荐配置 + Flagger 调研 + Longhorn 调研 → "这东西我了解过了"和"完全没听说过"在面试中是量级的差距
+**理想配置（时间充裕）：** 推荐配置 + 有选择地落地调研项（优先 Flagger canary，脱 Prometheus 依赖后实施）

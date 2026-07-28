@@ -287,11 +287,12 @@ ssh ops@k3s-node-01 "tree /home/ops/ansible/"
 **验证**：
 ```bash
 # node-01：检查 inventory 解析
-ansible-inventory -i /home/ops/ansible/inventory.ini --list | python3 -m json.tool
+cd /home/ops/ansible
+ansible-inventory -i inventory.ini --list | python3 -m json.tool
 
 # node-01：dry-run 检查语法
-ansible-playbook -i /home/ops/ansible/inventory.ini /home/ops/ansible/playbooks/00-init-system.yml --syntax-check
-ansible-playbook -i /home/ops/ansible/inventory.ini /home/ops/ansible/playbooks/01-deploy-k3s.yml --syntax-check
+ansible-playbook -i inventory.ini playbooks/00-init-system.yml --syntax-check
+ansible-playbook -i inventory.ini playbooks/01-deploy-k3s.yml --syntax-check
 ```
 
 ---

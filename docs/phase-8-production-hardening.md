@@ -11,13 +11,11 @@
 
 > **原规划的 ESO（External Secrets Operator）模块已移除**：ESO 官方支持的 48 个 provider 中不包含阿里云（Alibaba/AliCloud），无法直接对接阿里云 Secrets Manager。当前 `secret.yaml` 已 gitignored + `.example` 模板入库，安全性已满足项目要求，故放弃 ESO 模块。
 
-**状态：计划已就绪，待执行**（本文档仅规划，不实际修改集群）
-
 ## 2. 两模块架构总览
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          内网客户端 / 面试演示机                              │
+│                          内网客户端                                  │
 │                (浏览器 → https://shortlink.internal)                │
 └───────────────────────────┬──────────────────────────────────────────┘
                             │  内网 DNS → 192.168.1.228:443
@@ -202,8 +200,6 @@ kubectl get secret k3s-root-ca-secret -n cert-manager \
 # 3. 验证信任链（不再需要 --insecure）
 curl -vI https://shortlink.internal/health    # TLS 握手成功，无证书警告
 ```
-
-> **面试演示场景**：必须提前在演示用的电脑上导入 CA 公钥，否则面试官看到的是浏览器红色「不安全」警告页。
 
 #### Step 5 验证
 
@@ -410,7 +406,6 @@ Phase 2 (巡检):
 | 1 | 主 Ingress 加 host 后裸 IP 无法访问 | `curl <EIP>` 失效 | 保留独立健康检查 Ingress（`/health`，无 host） |
 | 1 | 根 CA 到期需手动更换（10 年） | 所有客户端需重新导入 CA | 文档记录 CA 指纹；到期前手动续签并重新分发 |
 | 2 | 巡检脚本在 Master 跑占用资源 | 影响写入 | 固定 node-03（Slave，只读）执行 |
-| 2 | ossutil 未安装 | 报告推送失败 | playbook 幂等检查 `which ossutil`（Phase 7 已装） |
 
 ## 8. 增强前后对比
 

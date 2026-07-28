@@ -71,7 +71,7 @@
 
 | 节点 | 角色 | 部署组件 |
 |------|------|---------|
-| node-01 | Master + Worker + etcd | K3s server、ArgoCD、Harbor、Velero、Orchestrator (容器) |
+| node-01 | Master + Worker + etcd | K3s server、FluxCD、Velero、Orchestrator (容器) |
 | node-02 | Master + Worker + etcd | K3s server、短链 App Pod、Redis Master (容器)、Sentinel x1 (容器)、MySQL Master (物理机)、ProxySQL (容器) |
 | node-03 | Master + Worker + etcd | K3s server、短链 App Pod、Redis Slave (容器)、Sentinel x2 (容器)、MySQL Slave (物理机)、xtrabackup 定时备份 |
 
