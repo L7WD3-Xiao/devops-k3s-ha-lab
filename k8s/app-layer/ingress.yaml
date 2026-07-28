@@ -1,15 +1,44 @@
 ---
-# Ingress — expose short link service via K3s built-in Traefik
+# Ingress — short link service via K3s built-in Traefik
 #
-# Access: http://<node-EIP>/ (Traefik listens on port 80 on all nodes)
-#
-# No host specified — catches all HTTP traffic on port 80.
-# In production, add a domain name + TLS certificate.
+# Two Ingress resources:
+#   1. shortlink:  HTTPS (websecure), domain shortlink.internal, cert-manager TLS
+#   2. shortlink-health: HTTP (web), 无 host, 仅 /health 路径, 保留 IP 直接访问
 ---
+# ── 主服务 Ingress (HTTPS) ──────────────────────────────────
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: shortlink
+  namespace: app-layer
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+  annotations:
+    cert-manager.io/cluster-issuer: ca-issuer
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  tls:
+    - hosts:
+        - shortlink.internal
+      secretName: shortlink-tls
+  rules:
+    - host: shortlink.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shortlink
+                port:
+                  number: 8080
+---
+# ── 健康检查 Ingress (HTTP, 保留 IP 访问) ─────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shortlink-health
   namespace: app-layer
   labels:
     app.kubernetes.io/part-of: shortlink-cluster
@@ -19,8 +48,8 @@ spec:
   rules:
     - http:
         paths:
-          - path: /
-            pathType: Prefix
+          - path: /health
+            pathType: Exact
             backend:
               service:
                 name: shortlink

@@ -1,0 +1,13 @@
+---
+# Stage 2: CA ClusterIssuer → 用根 CA 签发服务证书
+# 服务证书 1 年有效期，到期前 30 天自动 Renew
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ca-issuer
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: shortlink-cluster
+spec:
+  ca:
+    secretName: k3s-root-ca-secret
