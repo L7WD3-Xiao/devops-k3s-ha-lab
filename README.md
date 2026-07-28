@@ -136,6 +136,10 @@ git push (app/ 或 Dockerfile 变更)
 │   └── go.sum
 ├── Dockerfile                   # 多阶段构建（daocloud 镜像源）
 ├── k8s/
+│   ├── cert-manager/            # 自签 CA 私有 PKI（ClusterIssuer + 根 CA）
+│   │   ├── namespace.yaml
+│   │   ├── clusterissuer-selfsigned.yaml
+│   │   └── clusterissuer-ca.yaml
 │   ├── data-layer/              # Redis、Sentinel、ProxySQL、Orchestrator
 │   │   ├── kustomization.yaml
 │   │   ├── namespace.yaml        # PSS labels + ResourceQuota + LimitRange
@@ -168,12 +172,17 @@ git push (app/ 或 Dockerfile 变更)
 │       ├── 00-init-system.yml   # 系统初始化
 │       ├── 01-deploy-k3s.yml    # K3s 集群部署
 │       ├── 02-deploy-mysql.yml  # 数据层部署
-│       └── 03-configure-acr.yml # ACR 配置
+│       ├── 03-configure-acr.yml # ACR 配置
+│       ├── 04-setup-backup-tools.yml  # 备份工具安装
+│       ├── 05-restore-mysql.yml      # MySQL 恢复
+│       └── 08-db-inspect.yml         # 数据库自动巡检部署
 ├── terraform/                   # IaC
 ├── scripts/
 │   ├── autossh-tunnel.sh        # SSH 反向隧道守护脚本
 │   ├── check-tunnel.sh          # 隧道健康检查
-│   └── build-push.sh            # 手动构建推送
+│   ├── build-push.sh            # 手动构建推送
+│   ├── xtrabackup-backup.sh     # MySQL xtrabackup 异地备份
+│   └── db-inspect.sh            # MySQL 自动巡检（7 维度 → OSS）
 └── docs/
 ```
 
@@ -199,7 +208,9 @@ git push (app/ 或 Dockerfile 变更)
 <tr><td rowspan="3"><b>应用层</b></td><td>Go 1.22 + Gin</td><td>短链服务（358 行，REST API）</td></tr>
 <tr><td>ProxySQL</td><td>MySQL 读写分离（Read/Write Splitting）</td></tr>
 <tr><td>Redis Sentinel</td><td>Redis 高可用（自动故障切换）</td></tr>
-<tr><td rowspan="3"><b>运维</b></td><td>Traefik Ingress</td><td>K3s 内置七层负载均衡</td></tr>
+<tr><td rowspan="5"><b>运维</b></td><td>Traefik Ingress</td><td>K3s 内置七层负载均衡 + HTTPS（TLS 1.2+）</td></tr>
+<tr><td>cert-manager</td><td>自签 CA 私有 PKI（selfSigned → CA Issuer 两阶段签发）</td></tr>
+<tr><td>Velero FSB</td><td>集群资源 + PVC 数据备份（kopia 上传 OSS）</td></tr>
 <tr><td>HPA + PDB</td><td>水平扩缩容（CPU 70%）+ 最小可用保证</td></tr>
 <tr><td>SSH 反向隧道</td><td>本地 ↔ 集群安全通道（autossh 自动重连）</td></tr>
 </tbody>
@@ -220,7 +231,7 @@ git push (app/ 或 Dockerfile 变更)
 | **Phase 5** 🔄 | CI/CD 流水线 | GitHub Actions + FluxCD GitOps（已实现 ✅） |
 | **Phase 6** 🔒 | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描（已完成 ✅） |
 | **Phase 7** 💾 | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
-| **Phase 8** 📖 | 文档整理 | 架构文档、部署手册、简历产出物整理 |
+| **Phase 8** 🔐📊 | HTTPS + 数据库自动巡检 | cert-manager 自签 CA（私有 PKI）+ 7 维度 MySQL 自动巡检 → OSS 趋势留存 |
 
 各 Phase 详细文档在 [`docs/`](docs/) 目录，包含完整的**踩坑记录**（涵盖国内网络环境下的各种实际问题）。
 
@@ -299,6 +310,8 @@ curl -X POST http://<公网IP>/api/shorten \
 | ✅ SecurityContext + PSS | app-layer=restricted, data-layer=baseline |
 | ✅ Trivy CI 扫描 | HIGH/CRITICAL 阻断部署，SARIF 上传 |
 | ✅ ResourceQuota | namespace 资源总量限制 + LimitRange 默认值 |
+| ✅ HTTPS + cert-manager | 自签 CA 私有 PKI（两阶段 ClusterIssuer + TLS Ingress）|
+| ✅ MySQL 自动巡检 | 7 维度巡检 + 错误日志 + 告警 → OSS 趋势留存（每周日 02:00）|
 
 ---
 
@@ -310,7 +323,7 @@ curl -X POST http://<公网IP>/api/shorten \
 |------|------|---------|
 | **Phase 6** 🔒 | 安全加固（已完成 ✅） | RBAC 分层权限 + NetworkPolicy 白名单隔离 + PSS + SecurityContext + ResourceQuota + Trivy 镜像扫描 + ProxySQL 密码迁移 |
 | **Phase 7** 💾 | 备份容灾 | Velero 集群资源备份（含 PV 快照）、MySQL xtrabackup 异地备份、定期恢复演练 |
-| **Phase 8** 📖 | 文档整理 | 架构文档化、部署手册、简历产出物整理 |
+| **Phase 8** 🔐📊 | HTTPS + 数据库自动巡检 | cert-manager 自签 CA 私有 PKI（两阶段签发）、MySQL 7 维度自动巡检脚本 + OSS 趋势留存 |
 
 > 💡 **可观测性**（监控告警、日志收集）由简历另一项目单独承载，本项目不涉及，避免内容重叠。
 
