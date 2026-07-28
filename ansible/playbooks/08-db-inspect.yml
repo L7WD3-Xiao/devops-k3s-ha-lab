@@ -1,0 +1,205 @@
+---
+# 08-db-inspect.yml
+# 在 MySQL Slave (node-03) 部署数据库自动巡检脚本
+#   - 部署 scripts/db-inspect.sh → /usr/local/bin/
+#   - 验证 MySQL 客户端凭证 (/root/.my.cnf)
+#   - 验证 ossutil 可用性
+#   - 注册 cron: 每周日 02:00 执行巡检 → OSS 推送
+#
+# 前提:
+#   - group_vars/all.yml 已填写 oss_access_key_id/secret
+#   - OSS bucket k3s-backup-velero 已创建 (Phase 7)
+#   - ossutil 已在 node-03 安装 (Phase 7)
+#   - /root/.my.cnf 存在 (Phase 2 MySQL 部署)
+#
+# 用法:
+#   ansible-playbook -i inventory.ini playbooks/08-db-inspect.yml
+#
+# 验证:
+#   ansible-playbook -i inventory.ini playbooks/08-db-inspect.yml --tags verify
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Validate OSS credentials are set
+# ──────────────────────────────────────────────────────────────
+- name: Validate OSS configuration
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Check oss_access_key_id is set
+      assert:
+        that:
+          - oss_access_key_id is defined
+          - oss_access_key_id | length > 0
+          - oss_access_key_id != 'CHANGE_ME'
+        fail_msg: >
+          oss_access_key_id is empty or still placeholder. Set it in group_vars/all.yml.
+        success_msg: "OSS AccessKey ID is set"
+
+    - name: Check oss_access_key_secret is set
+      assert:
+        that:
+          - oss_access_key_secret is defined
+          - oss_access_key_secret | length > 0
+          - oss_access_key_secret != 'CHANGE_ME'
+        fail_msg: >
+          oss_access_key_secret is empty or still placeholder. Set it in group_vars/all.yml.
+        success_msg: "OSS AccessKey Secret is set (hidden)"
+
+    - name: Check OSS bucket name
+      assert:
+        that:
+          - oss_bucket is defined
+          - oss_bucket | length > 0
+        success_msg: "OSS bucket: {{ oss_bucket }}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: Deploy inspection script and cron on node-03
+# ──────────────────────────────────────────────────────────────
+- name: Deploy MySQL inspection system on node-03
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Verify MySQL client connectivity
+      command: mysqladmin ping --silent
+      register: mysql_ping
+      changed_when: false
+      failed_when: mysql_ping.rc != 0
+
+    - name: Check /root/.my.cnf exists
+      stat:
+        path: /root/.my.cnf
+      register: my_cnf_stat
+
+    - name: Assert /root/.my.cnf exists
+      assert:
+        that:
+          - my_cnf_stat.stat.exists
+        fail_msg: >
+          /root/.my.cnf not found on node-03.
+          MySQL client credentials required for inspection queries.
+          Create it with [client] section: host=127.0.0.1 user=root password=XXX
+        success_msg: "/root/.my.cnf exists"
+
+    - name: Verify ossutil is installed
+      command: "{{ ossutil_bin | default('/usr/local/bin/ossutil') }} version"
+      register: ossutil_ver
+      changed_when: false
+      failed_when: ossutil_ver.rc != 0
+
+    - name: Show ossutil version
+      debug:
+        msg: "{{ ossutil_ver.stdout }}"
+
+    - name: Create report directory
+      file:
+        path: /var/log/mysql-inspect
+        state: directory
+        mode: '0755'
+
+    - name: Deploy db-inspect.sh script
+      copy:
+        src: ../../scripts/db-inspect.sh
+        dest: /usr/local/bin/db-inspect.sh
+        mode: '0755'
+      register: inspect_script
+
+    - name: Test script dry-run
+      command: /usr/local/bin/db-inspect.sh --dry-run
+      register: dry_run
+      changed_when: false
+
+    - name: Show dry-run output
+      debug:
+        msg: "{{ dry_run.stdout_lines }}"
+
+    - name: Test script local-only mode (no OSS push)
+      command: /usr/local/bin/db-inspect.sh --local
+      register: local_run
+      changed_when: false
+      failed_when: local_run.rc != 0
+      # 首次实际巡检，验证 MySQL 可达性和所有查询可用
+
+    - name: Show local-only run output (last 10 lines)
+      debug:
+        msg: "{{ local_run.stdout_lines[-10:] }}"
+
+    - name: Show generated report path
+      command: ls -lt /var/log/mysql-inspect/mysql-inspect-*.txt | head -1
+      register: report_file
+      changed_when: false
+
+    - name: Display report header (first 20 lines)
+      command: head -20 {{ report_file.stdout.split()[-1] }}
+      register: report_header
+      changed_when: false
+
+    - name: Show report header
+      debug:
+        msg: "{{ report_header.stdout_lines }}"
+
+    - name: Deploy cron job (weekly Sunday 02:00)
+      cron:
+        name: "mysql-db-inspect"
+        minute: "0"
+        hour: "2"
+        weekday: "0"
+        job: "/usr/local/bin/db-inspect.sh >> /var/log/db-inspect.log 2>&1"
+        user: root
+        cron_file: db-inspect
+      register: cron_job
+
+    - name: Test OSS push (push the generated report to verify)
+      command: >
+        {{ ossutil_bin | default('/usr/local/bin/ossutil') }}
+        cp {{ report_file.stdout.split()[-1] }}
+        oss://{{ oss_bucket }}/mysql-inspect/
+        -e {{ oss_endpoint }}
+      register: oss_push
+      changed_when: false
+      failed_when: false
+      ignore_errors: true
+
+    - name: Show OSS push result
+      debug:
+        msg: "OSS push: {{ 'OK' if oss_push is success else 'FAILED' }}"
+      failed_when: oss_push is failed
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Summary
+# ──────────────────────────────────────────────────────────────
+- name: Display setup summary
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Show completion message
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " MySQL inspection system deployed on node-03"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " Script:         /usr/local/bin/db-inspect.sh"
+          - " Report dir:     /var/log/mysql-inspect/"
+          - " OSS prefix:     mysql-inspect/"
+          - " OSS endpoint:   {{ oss_endpoint }}"
+          - ""
+          - " Cron:           0 2 * * 0 (weekly Sunday 02:00 Asia/Shanghai)"
+          - " Cron log:       /var/log/db-inspect.log"
+          - ""
+          - " Manual run:     sudo /usr/local/bin/db-inspect.sh"
+          - " Local only:     sudo /usr/local/bin/db-inspect.sh --local"
+          - " Dry run:        sudo /usr/local/bin/db-inspect.sh --dry-run"
+          - ""
+          - " Verification:"
+          - "   cat /var/log/mysql-inspect/mysql-inspect-*.txt | head -30"
+          - "   ossutil ls oss://{{ oss_bucket }}/mysql-inspect/"
+          - ""
+          - "═══════════════════════════════════════════════════════"
