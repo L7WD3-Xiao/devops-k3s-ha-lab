@@ -1112,12 +1112,15 @@ systemctl start mysqld
 
 **⚠️ 前置条件**：
 
-1. **FluxCD 已缩到 0**：node-01 仅 2GB RAM，备份期间 Velero node-agent 的 kopia 会上传数据到 OSS，内存使用增加 ~100MB，可能触发 OOM Killer。
+1. **（node-01为2C4G可忽略此步，2C2G内存不够则做此步）**
+   **FluxCD 已缩到 0**：node-01 仅 2GB RAM，备份期间 Velero node-agent 的 kopia 会上传数据到 OSS，内存使用增加 ~100MB，可能触发 OOM Killer。
+   
    ```bash
-   kubectl scale deploy -n flux-system --replicas=0 --all
+kubectl scale deploy -n flux-system --replicas=0 --all
    ```
-
+   
 2. **Redis 备份注解已就位**：`k8s/data-layer/redis-statefulset.yaml` 的 `spec.template.metadata.annotations` 必须包含：
+
    ```yaml
    annotations:
      backup.velero.io/backup-volumes: redis-data
