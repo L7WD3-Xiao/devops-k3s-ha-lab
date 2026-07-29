@@ -55,13 +55,13 @@ k8s/
 │   ├── sentinel-statefulset.yaml
 │   ├── orchestrator.yaml
 │   └── proxysql.yaml
-├── app-layer/
-│   ├── kustomization.yaml          # 资源聚合 + image marker
-│   ├── namespace.yaml
-│   ├── configmap.yaml
-│   ├── shortlink.yaml
-│   ├── ingress.yaml
-│   └── hpa.yaml
+└── app-layer/
+    ├── kustomization.yaml          # 资源聚合 + image marker
+    ├── namespace.yaml
+    ├── configmap.yaml
+    ├── shortlink.yaml
+    ├── ingress.yaml
+    └── hpa.yaml
 ```
 
 > 不引入 base/overlays 层级，保持扁平结构。项目规模小，过度分层反而增加认知负担。

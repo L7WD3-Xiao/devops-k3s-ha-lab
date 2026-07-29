@@ -530,14 +530,6 @@ kubectl exec -n data-layer deploy/proxysql -- mysql -u admin -p'<NEW>' -h 127.0.
 curl http://116.62.168.245/health   # {"status":"ok"}
 ```
 
----
-
-### Step 9: 文档更新 + Git Commit
-
-- 编写 `docs/phase-6-security-hardening.md`（本文档）
-- 更新 `README.md` 路线图 Phase 6 状态
-- Git commit: `feat: Phase 6 — 安全加固 (RBAC + NetworkPolicy + PSS + Trivy + SecurityContext)`
-
 ## 5. 受影响文件总览
 
 ### 新建文件（7 个）
@@ -624,6 +616,3 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | 资源限制 | 无 | ResourceQuota + LimitRange + init container resources |
 | CI 安全 | 无扫描 | Trivy HIGH/CRITICAL 阻断 + SARIF |
 
-## 9. 下一步
-
-- Phase 7：备份容灾（Velero + xtrabackup）
