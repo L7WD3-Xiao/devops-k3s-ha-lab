@@ -173,9 +173,9 @@
 | 备份 | Velero (集群资源) + xtrabackup (MySQL) | 双备份策略 |
 | 业务 | Go (Gin) + Redis + MySQL | 编译快、镜像小、适合容器化 |
 
-> ArgoCD 实际采用 FluxCD，内存占用更少
+> Harbor 占用内存 2G，若选择 Harbor 需要升级 node-01 为 2C8G。本项目采用阿里云ACR通过云管理
 >
-> Harbor 实际采用 Aliyun ACR，内存占用更少
+> 同样也是内存原因，采用 FluxCD 而非 ArgoCD，内存占用更少
 
 ---
 

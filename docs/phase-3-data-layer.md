@@ -19,26 +19,26 @@
 
 ```
                          ┌──────────────────────────────────────────────────────┐
-                         │                   数据层架构                          │
+                         │                   数据层架构                           │
                          │                                                      │
-    MySQL 物理机          │  node-02 (Master)  ──GTID复制──►  node-03 (Slave)    │
+    MySQL 物理机          │  node-02 (Master)  ──GTID复制──►  node-03 (Slave)     │
     (非容器化)            │  192.168.1.230     read_only=ON   .229               │
                          │  MySQL 8.0.46                     MySQL 8.0.46       │
-                         │      ↑                               ↑                │
-                         │      │      ProxySQL (K8s)           │                │
-    Orchestrator+        │      │   ┌───────────────────┐       │                │
-    ProxySQL             │      └───┤ HG1 (writer) → .230├───────┘                │
-    (K8s 容器化)          │          │ HG2 (reader) → .229│                        │
-                         │          │ :6033 (MySQL)     │                        │
-                         │          └───────────────────┘                        │
-                         │  Orchestrator (K8s) → 监控拓扑 + 自动故障切换          │
+                         │      ↑                               ↑               │
+                         │      │      ProxySQL (K8s)           │               │
+    Orchestrator+        │      │   ┌───────────────────┐       │               │
+    ProxySQL             │      └───┤ HG1 (writer) → .230├───────┘              │
+    (K8s 容器化)          │          │ HG2 (reader) → .229│                      │
+                         │          │ :6033 (MySQL)     │                       │
+                         │          └───────────────────┘                       │
+                         │  Orchestrator (K8s) → 监控拓扑 + 自动故障切换           │
                          │                                                      │
-    Redis Sentinel       │  ┌── K8s StatefulSet (data-layer) ────┐               │
-    (K8s 容器化)          │  │ redis-0 (node-03)  Master/Slave    │               │
-                         │  │ redis-1 (node-02)  Master/Slave    │               │
-                         │  │ redis-2 (node-01)  Slave           │               │
-                         │  │ sentinel-0/1/2     3 节点分布       │               │
-                         │  └────────────────────────────────────┘               │
+    Redis Sentinel       │  ┌── K8s StatefulSet (data-layer) ────┐              │
+    (K8s 容器化)          │  │ redis-0 (node-03)  Master/Slave    │              │
+                         │  │ redis-1 (node-02)  Master/Slave    │              │
+                         │  │ redis-2 (node-01)  Slave           │              │
+                         │  │ sentinel-0/1/2     3 节点分布       │              │
+                         │  └────────────────────────────────────┘              │
                          └──────────────────────────────────────────────────────┘
 ```
 

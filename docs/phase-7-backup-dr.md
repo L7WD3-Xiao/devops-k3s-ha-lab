@@ -287,7 +287,8 @@ endpoint = {{ oss_endpoint }}
 - `${VAR:-default}` 环境变量默认值
 - 末尾汇总输出
 
-**实施修复**：
+**注意事项**：
+
 - 依赖 `/root/.my.cnf` 认证（不传 `--user`/`--password` 以防默认值覆盖 my.cnf）
 - 添加 `--safe-slave-backup` 暂停 SQL 线程确保 binlog 位置一致
 - `MYSQL_PASSWORD` 默认值改为 `""`（原 `CHANGE_ME` 会覆盖 my.cnf）
@@ -999,11 +1000,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 5. **RESET REPLICA ALL 必须在 CHANGE 前**：xtrabackup 备份包含 `mysql.slave_master_info` 和 `mysql.slave_relay_log_info` 表，直接 `START REPLICA` 会报 `ERROR 1872 — Replica failed to initialize applier metadata`。必须先 `RESET REPLICA ALL` 清空旧的复制元数据，再重新配置
 6. **xtrabackup 输出在 stderr**：`completed OK!` 和进度日志全部输出到标准错误流。Ansible 的 `command` 模块的 `register` 变量同时捕获 stdout 和 stderr，验证条件必须检查 `prepare_result.stdout + prepare_result.stderr`
 
-#### 4.4 验证
-
-见 Step 6
-
-#### 4.5 注意事项
+#### 4.4 注意事项
 
 1. **node-03 停机时间**：恢复期间 MySQL Slave 停机约 5-10 分钟（771M 数据），ProxySQL 将读请求路由到 Master
 2. **从 Slave 备份恢复到 Slave**：备份包含 Slave 的 GTID 已执行集，恢复后新 Slave 用 `SOURCE_AUTO_POSITION=1` 连接 Master 自动同步
@@ -1022,7 +1019,9 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 **类型**：文档 + kubectl 命令（无新文件）
 **依赖**：Step 3（Velero 已安装，有备份）
 
-#### 5.1 恢复命令
+#### 5.1 参考恢复命令
+
+> 验证见 Step 6
 
 ```bash
 # 1. 列出可用备份
@@ -1328,25 +1327,6 @@ kubectl delete restore drill-restore -n velero
 ---
 
 ## 5. 受影响文件总览
-
-### 新建文件（14 个）
-
-| 文件路径 | 步骤 | 说明 |
-|---------|------|------|
-| `ansible/playbooks/04-setup-backup-tools.yml` | Step 2 | xtrabackup + ossutil 安装 + cron 部署 |
-| `ansible/playbooks/templates/ossutil-config.j2` | Step 2 | ossutil 配置模板 |
-| `ansible/playbooks/05-restore-mysql.yml` | Step 4 | MySQL xtrabackup 恢复 playbook |
-| `scripts/xtrabackup-backup.sh` | Step 2 | MySQL 备份脚本（流式 + 推送 OSS） |
-| `k8s/velero/namespace.yaml` | Step 3 | Velero namespace + ResourceQuota |
-| `k8s/velero/rbac.yaml` | Step 3 | ServiceAccount + ClusterRoleBinding |
-| `k8s/velero/deployment.yaml` | Step 3 | Velero server Deployment + AWS 插件 init container |
-| `k8s/velero/node-agent-daemonset.yaml` | Step 3 | node-agent DaemonSet (FSB/kopia) |
-| `k8s/velero/bsl-oss.yaml` | Step 3 | BackupStorageLocation (OSS S3 兼容) |
-| `k8s/velero/schedule.yaml` | Step 3 | Velero Schedule (每日 02:30) |
-| `k8s/velero/cloud-credentials.example` | Step 3 | OSS 凭证脱敏模板 |
-| `k8s/velero/kustomization.yaml` | Step 3 | Kustomize base |
-| `clusters/production/velero.yaml` | Step 3 | FluxCD Kustomization CR |
-| `docs/phase-7-backup-dr.md` | Step 7 | Phase 7 文档（本文档） |
 
 ### 新建文件（14 个）
 

@@ -90,7 +90,7 @@
 | proxysql:2.7.2 | root | 无预置 | /var/lib/proxysql (emptyDir) | baseline (root) |
 | orchestrator:latest | root | 无预置 | 无持久写入 | baseline (root) |
 
-## 4. 实施计划（9 步）
+## 4. 实施步骤（9 步）
 
 > 执行顺序严格按依赖关系排列：SecurityContext 必须在 PSS 之前部署，否则 Pod 会被 PSS 拒绝调度。
 

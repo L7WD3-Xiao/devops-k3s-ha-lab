@@ -213,9 +213,10 @@ vim ansible/group_vars/all.yml
 # 填入 acr_username 和 acr_password（以及 MySQL 等其他密码）
 
 # 2. 执行 Ansible playbook
+cd /home/ops/ansible
 ansible-playbook -i inventory.ini playbooks/03-configure-acr.yml
 
-# 3. 验证 K3s 可以拉取 ACR 镜像（先推送一个测试镜像）
+# 3. 验证 K3s 可以拉取 ACR 镜像（先推送一个测试镜像hello-world）
 docker login crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com
 docker pull hello-world
 docker tag hello-world crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test

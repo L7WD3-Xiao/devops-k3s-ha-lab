@@ -401,7 +401,7 @@ chmod 600 kubeconfig.yaml
 kubectl --kubeconfig kubeconfig.yaml get nodes
 ```
 
-> 本机没有 kubectl 则不用此步，直接在 k3s-node-01 查看，同时命令删除“ --kubeconfig kubeconfig.yaml ”，例如：
+> 本机没有 kubectl 则不用此步，直接在 k3s-node-01 查看，同时命令删除“ --kubeconfig kubeconfig.yaml ”（包括下方验证清单中的命令），例如：
 
 ```bash
 ssh ops@k3s-node-01
