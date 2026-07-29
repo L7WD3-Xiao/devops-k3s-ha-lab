@@ -35,9 +35,9 @@ variable "zone_id" {
 # ═══════════════════════════════════════════════
 
 variable "instance_type" {
-  description = "ECS 实例规格（node-01，轻量节点，2C2G 够用）"
+  description = "ECS 实例规格（node-01，升级到 2C4G 减轻内存压力）"
   type        = string
-  default     = "ecs.e-c1m1.large"
+  default     = "ecs.e-c1m2.large"
 }
 
 variable "instance_type_upgraded" {
@@ -79,24 +79,24 @@ variable "ssh_key_name" {
 # ═══════════════════════════════════════════════
 # 余额保护原则：每个变量设为 true 前需用户确认费用
 # Phase A: 全部 false → 仅创建 VPC + 安全组 + 密钥（免费）
-# Phase B: create_node_01 + create_eip = true → 创建首台 + EIP（~45 元/月）
-# Phase D: create_node_02 = true → 创建第二台（~45 元/月）
-# Phase E: create_node_03 = true → 创建第三台（~45 元/月）
+# Phase B: create_node_01 + create_eip = true → 创建首台 + EIP
+# Phase D: create_node_02 = true → 创建第二台
+# Phase E: create_node_03 = true → 创建第三台
 
 variable "create_node_01" {
-  description = "是否创建 k3s-node-01。设为 true 前需用户确认费用。"
+  description = "是否创建 k3s-node-01。"
   type        = bool
   default     = false
 }
 
 variable "create_node_02" {
-  description = "是否创建 k3s-node-02。设为 true 前需用户确认费用。"
+  description = "是否创建 k3s-node-02。"
   type        = bool
   default     = false
 }
 
 variable "create_node_03" {
-  description = "是否创建 k3s-node-03。设为 true 前需用户确认费用。"
+  description = "是否创建 k3s-node-03。"
   type        = bool
   default     = false
 }

@@ -302,8 +302,45 @@ winget install --id HashiCorp.Terraform --accept-source-agreements --accept-pack
 | EIP 按量 | `PayByTraffic` | 安装阶段一次性 ~3 元，后续 < 1 元/月 |
 | 密钥对 | `alicloud_ecs_key_pair` 资源自动创建 | 无需控制台手动操作 |
 
+`terraform/terraform.tfvars` 模板
+
+> 默认全部 false 是指在 `terraform\variables.tf` 中这些变量设置了 default = false
+
+```shell
+# ═══ 分步创建控制（默认全部 false，按阶段手动开启）═══
+# Phase A: 全部 false → VPC + 安全组 + 密钥（免费）
+# Phase B: create_node_01 + create_eip = true → 首台 ECS + EIP
+# Phase D: create_node_02 = true → 第二台 ECS
+# Phase E: create_node_03 = true → 第三台 ECS
+create_node_01 = true
+create_node_02 = true
+create_node_03 = true
+create_eip     = true
+
+# ═══ Ops 用户公钥 ═══
+ops_pubkey = "change-it"
+```
+
+`terraform/setenv.sh` 模板
+
+```shell
+#!/bin/bash
+# Alibaba Cloud credentials for Terraform
+# This file is gitignored — do NOT commit
+export ALICLOUD_ACCESS_KEY="change-it"
+export ALICLOUD_SECRET_KEY="change-it"
+export ALICLOUD_REGION="cn-hangzhou"
+```
+
 **验证**：
+
 ```bash
+# 进入 terraform 文件夹
+cd terraform
+
+# 通过 setenv.sh 导入 AccessKey 
+source setenv.sh
+
 terraform init             # Provider 下载成功
 terraform fmt -check       # 格式合规
 terraform validate         # 配置语法正确
@@ -316,7 +353,11 @@ terraform validate         # 配置语法正确
 **目标**：创建 VPC + VSwitch + 安全组 + SSH 密钥对。此步骤不产生 ECS 实例费用（0 元）。
 
 ```bash
-# terraform.tfvars: 全部 create_* = false
+# 修改terraform.tfvars: 全部 create_* = false
+# 看一下当前配置如果执行了，会有什么改动
+terraform plan
+
+# 应用配置
 terraform apply
 ```
 
