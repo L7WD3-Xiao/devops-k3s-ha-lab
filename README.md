@@ -12,11 +12,9 @@
 <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
 </p>
 </div>
-
-
 ---
 
-## 📖 项目简介
+## 项目简介
 
 本项目完整搭建了一套**生产级 K3s 高可用集群**，集成 **FluxCD GitOps** 持续部署与 **GitHub Actions** 持续集成，运行一个 Go 短链服务（Shortlink）。
 
@@ -36,7 +34,7 @@
 
 ---
 
-## 🏛️ 架构总览
+## 架构总览
 
 ### 请求流
 
@@ -89,7 +87,7 @@
 
 ---
 
-## 🚀 CI/CD 流程
+## CI/CD 流程
 
 ```text
 git push (app/ 或 Dockerfile 变更)
@@ -121,7 +119,7 @@ git push (app/ 或 Dockerfile 变更)
 
 ---
 
-## 📂 项目结构
+## 项目结构
 
 <details open>
 <summary>点击展开/收起</summary>
@@ -190,7 +188,7 @@ git push (app/ 或 Dockerfile 变更)
 
 ---
 
-## 🧱 技术栈
+## 技术栈
 
 <table>
 <thead><tr><th>分类</th><th>技术</th><th>用途</th></tr></thead>
@@ -218,7 +216,7 @@ git push (app/ 或 Dockerfile 变更)
 
 ---
 
-## 🧪 学习路线
+## 学习路线
 
 本项目按 5 个 Phase 递进构建，每阶段产出可独立验证：
 
@@ -237,13 +235,15 @@ git push (app/ 或 Dockerfile 变更)
 
 ---
 
-## 🚦 快速开始
+## 快速开始
+
+> 快速不了，此处仅供参考，具体流程请根据文档执行
 
 ### 前置条件
 
 ```bash
 # 1. 3 台同 VPC 的 Alibaba Cloud ECS（推荐 2C4G）
-# 2. 本地安装 SSH 客户端 + kubectl + flux CLI
+# 2. 本地安装 SSH 客户端 + kubectl + terraform
 # 3. GitHub 仓库 + ACR 容器镜像仓库
 ```
 
@@ -292,7 +292,7 @@ curl -X POST http://<公网IP>/api/shorten \
 
 ---
 
-## 📸 功能验证
+## 功能验证
 
 | 功能 | 状态 |
 |------|------|
@@ -315,25 +315,13 @@ curl -X POST http://<公网IP>/api/shorten \
 
 ---
 
-## 🗺️ 路线图
-
-按照项目规划，后续实施路线分为以下 3 个 Phase：
-
-| 阶段 | 内容 | 关键产出 |
-|------|------|---------|
-| **Phase 6** 🔒 | 安全加固（已完成 ✅） | RBAC 分层权限 + NetworkPolicy 白名单隔离 + PSS + SecurityContext + ResourceQuota + Trivy 镜像扫描 + ProxySQL 密码迁移 |
-| **Phase 7** 💾 | 备份容灾 | Velero 集群资源备份（含 PV 快照）、MySQL xtrabackup 异地备份、定期恢复演练 |
-| **Phase 8** 🔐📊 | HTTPS + 数据库自动巡检 | cert-manager 自签 CA 私有 PKI（两阶段签发）、MySQL 7 维度自动巡检脚本 + OSS 趋势留存 |
-
-> 💡 **可观测性**（监控告警、日志收集）由简历另一项目单独承载，本项目不涉及，避免内容重叠。
-
-### 备选 / 拓展方向
+## 拓展方向
 
 - **Helm Charts**：将 Kustomize 扁平结构迁移为 Helm Chart，提升包管理和版本化能力
 
 ---
 
-## 📚 参考
+## 参考
 
 - [K3s 官方文档](https://docs.k3s.io)
 - [FluxCD 文档](https://fluxcd.io/flux/)
