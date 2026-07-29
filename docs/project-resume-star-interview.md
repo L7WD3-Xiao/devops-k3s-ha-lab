@@ -9,7 +9,7 @@
 
 ### 项目名称：基于 K3s 的高可用集群设计与实现
 
-**技术栈：**K3s · Ansible · Terraform · FluxCD · GitHub Actions · MySQL 8.0 · Orchestrator · ProxySQL · Redis Sentinel · Go · Helm · Kustomize · Velero · Percona XtraBackup · Aliyun ACR · Trivy · NetworkPolicy · RBAC
+**技术栈：**K3s · Ansible · Terraform · FluxCD · GitHub Actions · MySQL 8.0 · Orchestrator · ProxySQL · Redis Sentinel · Go · Helm · Kustomize · cert-manager · Velero · Percona XtraBackup · Aliyun ACR · Trivy · NetworkPolicy · RBAC
 
 ---
 
@@ -23,7 +23,8 @@
 - **数据层高可用**。MySQL 物理机 GTID 主从复制，Orchestrator 自动检测故障并提升 Slave，ProxySQL 基于 read_only 变量实现读写分离。Redis 1 主 2 从 StatefulSet + 3 Sentinel 哨兵集群，防反亲和跨节点分布，RDB+AOF 双持久化。
 - **CI/CD 与 GitOps**。Go 多阶段构建至 7.5MB 最终镜像，非 root 用户运行。GitHub Actions 全自动流水线：go vet/test、docker buildx、push ACR、Trivy 扫描 HIGH/CRITICAL 阻断、sed 更新 Kustomize newTag、git commit 回推。FluxCD 6 个 controller 同步 Git 状态，漂移自动纠正。
 - **安全纵深**。6 个命名 ServiceAccount；三层 RBAC（admin/developer/viewer）；12 条 NetworkPolicy 白名单覆盖完整数据流；PSS 差异化——app-layer restricted（非 root + readOnlyRootFilesystem + drop ALL），data-layer baseline（兼容 root 镜像但 drop ALL + 禁止提权）；SecurityContext 覆盖全部 5 个 Workload；Trivy CI 集成，阻断含 HIGH/CRITICAL 漏洞的镜像入库。
-- **备份容灾**。Velero FSB（kopia）每日备份 K8s 资源与 Redis PVC 至阿里云 OSS；xtrabackup 在 Slave 节点流式全量备份 MySQL（stream=xbstream | gzip），通过 ossutil 推送 OSS。双备份维基异域保留 7 天，OSS Lifecycle Rule 自动清理。
+- **备份容灾**。Velero FSB（kopia）每日备份 K8s 资源与 Redis PVC 至阿里云 OSS；xtrabackup 在 Slave 节点流式全量备份 MySQL（stream=xbstream | gzip），通过 ossutil 推送 OSS。双备份维度异地保留 7 天，OSS Lifecycle Rule 自动清理。
+- **生产级加固**。cert-manager（selfSigned → CA Issuer 两阶段签发）实现 HTTPS 全链路加密，自签根 CA 10 年+ 服务证书 90 天自动续签。数据库 7 维度自动巡检（空间/碎片/慢查询/复制/连接/性能/错误日志），cron 每周推送报告至 OSS 形成趋势基线。
 
 **Result**
 
@@ -32,6 +33,7 @@
 - CI/CD 全自动化，git push 到生产上线 < 5min。
 - 双链路备份到 OSS，7 天保留，恢复流程已验证。
 - 全链路 IaC——Terraform 基础设施 + Ansible 集群部署 + FluxCD GitOps——环境可一键复现。
+- 全站 HTTPS 加密，证书 90 天自动续签；数据库运维可观测，每周结构化巡检 + OSS 趋势留存。
 
 ---
 
