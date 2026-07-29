@@ -130,6 +130,27 @@ spec:
 
 需要在 Go 镜像中安装 ca-certificates 包（已经在 Dockerfile 里了），因为短链的 301 重定向目标可能是 HTTPS 站点（如 `https://kubernetes.io`），Go 标准库需要 CA 证书来验证目标站点的 TLS 证书。这里 CA 用的是操作系统的根证书存储，和集群的自签根 CA 是两个不同的信任链——互不影响。
 
+**Q：在国内公网环境向用户提供服务，你们的 HTTPS 方案需要改什么？**
+
+如果要把这套方案迁移到公网生产环境，从流程到架构都需要调整，我分几个层面说：
+
+**前置合规（国内特有）：**
+1. **ICP 备案**——服务器在大陆境内提供 Web 服务必须完成 ICP 备案（工信部）。阿里云 ECS 控制台直接提交材料，一般 10-20 个工作日。备案成功后会得到一个 ICP 号，必须在网站页面底部展示。**这是硬性门槛，没有备案会被 ISP 封堵 80/443 端口。** 香港或海外节点可绕过 ICP 备案，但延迟会高。
+2. **域名实名认证**——`.com`/`.cn` 等域名在中国大陆运营必须完成实名认证（提交身份证/营业执照），通过后才能设置 DNS 解析指向服务器 IP。
+3. **等保 2.0**——如果是对公网的正式生产业务，需要按等级保护制度做安全评估。对于中小型 Web 服务，等保二级是常见要求（约 5-10 万/年的第三方测评费用），但校招项目不涉及。
+
+**架构调整：**
+4. **公网 CA 替换自签 CA**——公网访问必须使用受信任的公共 CA（Let's Encrypt、DigiCert、阿里云 SSL 证书服务）。自签 CA 在浏览器里会直接拦截，用户不可能手动导入 CA。cert-manager 可以配置 Let's Encrypt ACME HTTP-01 验证——需要域名 A 记录指向服务器公网 IP、`:80` 公网可达。阿里云 SSL 证书服务也提供免费 DV 证书（1 年，自动续签），通过 DNS-01 验证，不需要开放 `:80`。
+5. **SLB（Server Load Balancer）替换直连 EIP**——当前 SSH 隧道 + 直连 EIP 的方式不适合公网生产。阿里云 SLB 提供四层 TCP/UDP 或七层 HTTP/HTTPS 负载均衡，可以在 SLB 上终结 HTTPS（SSL offloading），后端用 HTTP 传给 Traefik。SLB 自带 DDoS 基础防护。
+6. **CDN + WAF**——公网服务建议在前面加一层 CDN（阿里云 CDN 或 CloudFront），静态资源缓存、动态请求回源，同时吸收突发流量。WAF（Web 应用防火墙）可以过滤 SQL 注入、XSS 等常见攻击。cert-manager 的证书可以和 CDN 集成（CDN 上配 HTTPS，源站用内部 CA 或 HTTP）。
+
+**CI/CD 调整：**
+7. **镜像拉取无需 VPC 域名**——公网环境下 GitHub Actions push 和集群 pull 都走公网 ACR 域名即可，不需要 VPC 内网域名策略。但如果集群在阿里云 VPC 内且 ACR 也在同地域，VPC 域名仍然有速度优势（内网传输免费、快速）。
+8. **Webhook 回调可达**——公网服务的 CI/CD 如果需要 Webhook 回调（如 GitHub webhook 触发灰度发布），需要集群入站公网可达，或采用 polling 模式（FluxCD 默认 polling GitHub）。
+
+**成本变化：**
+> 公网 ECS 实例仅带宽费用约 100-200 元/月（5Mbps 按固定带宽），SLB 实例费约 0.1-0.2 元/小时，SSL 证书免费（Let's Encrypt 或阿里云免费 DV）。整体增加约 300-500 元/月。如果接受初期不加 SLB 直接用节点 EIP 暴露（对学生项目可接受），仅带宽费即可。
+
 ---
 
 ### 2. External Secrets Operator 📖 了解

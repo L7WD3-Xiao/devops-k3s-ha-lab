@@ -276,7 +276,7 @@ winget install --id HashiCorp.Terraform --accept-source-agreements --accept-pack
 
 > ⚠️ 不要使用主账号 AccessKey，安全风险太大。RAM 子用户只需 ECS 管理权限即可。
 >
-> AccessKey ID 和 AccessKey Secret 用在下面 setenv.sh
+> AccessKey ID 和 AccessKey Secret 用在Step 2 的 `setenv.sh`
 
 ### Step 2: Terraform 项目文件
 
