@@ -467,7 +467,7 @@ sudo bash -c \
 |--------|-----|
 | Velero 版本 | v1.15.0（或实施时最新稳定版） |
 | AWS 插件 | velero-plugin-for-aws:v1.11.0 |
-| 镜像来源 | ACR VPC (`crpi-*.personal.cr.aliyuncs.com`) 推送 + node-01 Docker Hub 拉取 |
+| **镜像来源** | **ACR VPC (`crpi-*.personal.cr.aliyuncs.com`) 推送 + node-01 Docker Hub 拉取** |
 | 备份模式 | FSB (File System Backup / kopia) |
 | 调度节点 | **node-01** (唯一有公网拉取 ghcr.io/Docker Hub 镜像；2C2G 需缩 FluxCD 防 OOM) |
 
@@ -1112,7 +1112,7 @@ systemctl start mysqld
 
 **⚠️ 前置条件**：
 
-1. **（node-01为2C4G可忽略此步，2C2G内存不够则做此步）**
+1. **（node-01为2C4G可忽略此步，2C2G内存不够则进行此步，见下方风险#12）**
    **FluxCD 已缩到 0**：node-01 仅 2GB RAM，备份期间 Velero node-agent 的 kopia 会上传数据到 OSS，内存使用增加 ~100MB，可能触发 OOM Killer。
    
    ```bash
