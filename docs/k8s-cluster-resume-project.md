@@ -73,13 +73,17 @@
 
 3 节点均为 Master + Worker，使用 K3s embedded etcd 实现控制面高可用。
 
-| 节点 | 角色 | 部署组件 |
+| 机器 | 角色 | 部署组件 |
 |------|------|---------|
-| node-01 | Master + Worker + etcd | K3s server、FluxCD、Velero、Orchestrator (容器) |
+| node-01 | Master + Worker + etcd | Ansible、K3s server、FluxCD、Velero、Orchestrator (容器) |
 | node-02 | Master + Worker + etcd | K3s server、短链 App Pod、Redis Master (容器)、Sentinel x1 (容器)、MySQL Master (物理机)、ProxySQL (容器) |
 | node-03 | Master + Worker + etcd | K3s server、短链 App Pod、Redis Slave (容器)、Sentinel x2 (容器)、MySQL Slave (物理机)、xtrabackup 定时备份 |
+| 本机 | IaC 控制端（非集群节点） | Terraform |
 
-**为什么 3 节点**：etcd 共识需要奇数节点，3 是最小 HA 单元，成本可控。
+**为什么 3 节点**：etcd 共识需要过半同意，因此设置奇数节点，而 3 是最小 HA 单元，成本可控。参见：
+
+- [深入 etcd：Raft 共识协议中的选举机制](https://white-festa.net/posts/kubernetes-etcd共识机制/)
+- [从k8s集群主节点数量为什么是奇数来聊聊分布式系统 - 知乎](https://zhuanlan.zhihu.com/p/430402018)
 
 **为什么 k3s 而非 k8s**：轻量级（单二进制），内置 Traefik + Flannel + CoreDNS，资源友好；概念与 k8s 完全一致，简历可写"k8s 体系"。
 

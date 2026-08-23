@@ -19,10 +19,10 @@
                         │            K3s HA Cluster               │
                         │         (embedded etcd HA)              │
                         │                                         │
-   Internet             │  node-01          node-02    node-03   │
-   ──────────────► EIP  │  192.168.1.228    .230       .229      │
-                        │  server+etcd      server+etcd server+etcd│
-                        │  worker           worker     worker    │
+   Internet             │  node-01          node-02     node-03   │
+   ──────────────► EIP  │  192.168.1.228    .230        .229      │
+                        │  server+etcd    server+etcd  server+etcd│
+                        │  worker           worker      worker    │
                         └────────────┬────────────────────────────┘
                                      │
                           Ansible 控制节点 (node-01)
@@ -130,7 +130,7 @@ ansible/
 
 `01-deploy-k3s.yml` 分 4 个 Play：
 
-#### Play 1: Pre-flight 检查（所有节点）
+#### Play 1: Pre-flight 预检（所有节点）
 
 - 验证 swap 已禁用
 - 验证 systemd 运行正常
@@ -235,7 +235,7 @@ Step 5: 集群验证 ──────────► 3 节点 Ready → etcd �
 scp -i ~/.ssh/id_rsa ~/.ssh/id_rsa ops@<集群公网入口IP>:/home/ops/.ssh/deploy_key
 scp -i ~/.ssh/id_rsa ~/.ssh/id_rsa.pub ops@<集群公网入口IP>:/home/ops/.ssh/deploy_key.pub
 
-# nod-01：安装 ansible-core（python3.11 pip 方式最可靠）
+# node-01：安装 ansible-core（python3.11 pip 方式最可靠）
 ssh ops@k3s-node-01
 sudo python3.11 -m pip install ansible-core
 
@@ -276,6 +276,7 @@ ansible all -i inventory.ini -a "hostname"                # 返回 k3s-node-01/0
 | `ansible/playbooks/templates/k3s-config.yaml.j2` | K3s config.yaml Jinja2 模板 |
 
 **执行**：
+
 ```bash
 # 本机：上传 ansible/ 目录
 scp -r ansible ops@<集群公网入口IP>:/home/ops/ansible/
@@ -299,9 +300,10 @@ ansible-playbook -i inventory.ini playbooks/01-deploy-k3s.yml --syntax-check
 
 ### Step 3: 系统初始化
 
-**目标**：在 3 节点上运行 `00-init-system.yml`，统一系统配置（swap 禁用、内核参数、hosts 映射、时区 NTP、firewalld 禁用、ops 用户确认）。
+**目标**：对 3 节点执行 `00-init-system.yml`，统一系统配置（swap 禁用、内核参数、hosts 映射、时区 NTP、firewalld 禁用、ops 用户确认）。
 
 **执行**：
+
 ```bash
 # node-01：运行系统初始化 playbook
 cd /home/ops/ansible
@@ -353,7 +355,7 @@ ansible-playbook -i inventory.ini playbooks/01-deploy-k3s.yml
 
 | Play | 目标节点 | 关键操作 | 依赖 |
 |------|---------|---------|------|
-| Play 1: Pre-flight | 全部 | 验证 swap/sysctl/systemd/网络互通/未安装 | Step 3 完成 |
+| Play 1: Pre-flight | 全部 | 验证 swap/sysctl/systemd/网络互通/k3s未安装 | Step 3 完成 |
 | Play 2: cluster-init | node-01 | 渲染 config.yaml → 下载 K3s 二进制 → `cluster-init: true` 安装 → 等待 Ready → 读取 token | K3s 二进制预下载到 `/usr/local/bin/k3s` |
 | Play 3: join（serial: 1） | node-02 → node-03 | 从 node-01 复制 K3s 二进制 → 渲染 join config → `server: https://node-01:6443` 安装 → 等待 Ready | token 来自 Play 2 |
 | Play 4: 健康验证 | node-01 | 3 节点 Ready + pod Running + etcd 健康 | Play 3 完成 |
@@ -388,20 +390,7 @@ kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml wait --for=condition=Ready nodes 
 
 **目标**：全面验证 K3s 集群 3 节点 Ready、etcd 健康、核心 Pod 正常运行、kubeconfig 可用。
 
-**配置 kubectl 访问**（本机）：
-
-```bash
-# 从 node-01 获取 kubeconfig
-ssh ops@k3s-node-01 "cat /etc/rancher/k3s/k3s.yaml" \
-  | sed "s/127.0.0.1/<集群公网入口IP>/g" \
-  > kubeconfig.yaml
-
-chmod 600 kubeconfig.yaml
-# 验证
-kubectl --kubeconfig kubeconfig.yaml get nodes
-```
-
-> 本机没有 kubectl 则不用此步，直接在 k3s-node-01 查看，同时命令删除“ --kubeconfig kubeconfig.yaml ”（包括下方验证清单中的命令），例如：
+**配置 kubectl 访问**：
 
 ```bash
 ssh ops@k3s-node-01
@@ -414,30 +403,45 @@ chmod 600 $HOME/.kube/config
 kubectl get nodes -o wide
 ```
 
+> 补充：如果本机有 kubectl，可通过 kubeconfig 查看集群状态，例如：
+
+```bash
+# 从 node-01 获取 kubeconfig
+ssh ops@k3s-node-01 "cat /etc/rancher/k3s/k3s.yaml" \
+  | sed "s/127.0.0.1/<集群公网入口IP>/g" \
+  > kubeconfig.yaml
+
+chmod 600 kubeconfig.yaml
+# 验证
+kubectl --kubeconfig kubeconfig.yaml get nodes
+```
+
+> chmod 600/755，数字使用八进制表示法：[Linux Chmod 755 命令：它有什么作用？-云社区-华为云](https://bbs.huaweicloud.com/blogs/detail/300171)
+
 **验证清单**：
 
 ```bash
 # 1. 3 节点全部 Ready
-kubectl --kubeconfig kubeconfig.yaml get nodes -o wide
+kubectl get nodes -o wide
 # NAME      STATUS   ROLES                       AGE   VERSION
 # node-01   Ready    control-plane,etcd,master   ...   v1.36.2+k3s1
 # node-02   Ready    control-plane,etcd,master   ...   v1.36.2+k3s1
 # node-03   Ready    control-plane,etcd,master   ...   v1.36.2+k3s1
 
 # 2. 核心 Pod 全部 Running
-kubectl --kubeconfig kubeconfig.yaml get pods -n kube-system
+kubectl pods -n kube-system
 # coredns, metrics-server, local-path-provisioner, traefik, svclb-traefik
 
 # 3. etcd 健康
-kubectl --kubeconfig kubeconfig.yaml get pods -n kube-system | grep etcd
+kubectl pods -n kube-system | grep etcd
 # etcd-node-01, etcd-node-02, etcd-node-03 全部 Running
 
 # 4. etcd 成员检查
-ssh ops@k3s-node-01 "sudo /usr/local/bin/k3s etcd member list"
-# 3 active members
+sudo /usr/local/bin/k3s etcd member list
+# show 3 active members
 
 # 5. 远程 API Server 访问
-kubectl --kubeconfig kubeconfig.yaml cluster-info
+kubectl cluster-info
 # Kubernetes control plane is running at https://<集群公网入口IP>:6443
 ```
 

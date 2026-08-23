@@ -18,26 +18,6 @@
 | K8s 备份时间 | 每日 02:30 (Asia/Shanghai, xtrabackup 之后) |
 | 预估月费用 | ~¥0.84（标准存储 LRS ¥0.12/GB/月, 7 天总量 ~7GB） |
 
-### 实施验证摘要
-
-| 组件 | 状态 | 说明 |
-|------|------|------|
-| OSS Bucket | ✅ 已创建 | `k3s-backup-velero`, Lifecycle rule 7 天 |
-| xtrabackup 手动测试 | ✅ 通过 | 771M 数据 → 4.5M gzip, `completed OK!` |
-| xtrabackup cron | ⏳ 待设置 | 每日 02:00, 由 Ansible playbook 04 部署 |
-| Velero Pod | ✅ Running (1/1) | node-02, 全参数验证通过 |
-| node-agent DaemonSet | ✅ Running (1/1) | node-01 仅（nodeSelector 限制） |
-| BSL (OSS) | ✅ Available | `s3ForcePathStyle=false`, `checksumAlgorithm=""` |
-| Velero 测试备份 | ✅ Completed | 55 items, 0 errors |
-| 恢复演练 (MySQL) | ✅ 通过 | 2026-07-27 端到端验证，9 个 Play 全部通过 |
-| 恢复演练 (K8s) | ✅ 通过 | 2026-07-27 端到端验证，备份→删除→恢复→数据验证完整链路 |
-| node-agent 标签修复 | ✅ 已修复 | DaemonSet label 改为 `name=node-agent` (Velero v1.15 硬编码) |
-| node-agent 全节点部署 | ✅ 已修复 | 移除 nodeSelector，所有 3 节点运行 node-agent |
-| OOM 问题 | ⚠️ 已缓解 | FluxCD 缩到 0 释放内存，长期需升级 node-01 或拆分负载 |
-| containerd mirror (node-02/03) | ⚠️ 已修复 | 移除 docker.io mirror，避免缓存镜像被忽略 |
-| Redis AOF 持久化 | ✅ 已确认 | 备份前需 `BGREWRITEAOF` 确保数据刷盘 |
-| Sentinel 状态 | ⚠️ 已知限制 | Pod 重建后 Sentinel 持有旧 IP，需重置 PVC |
-
 ## 2. 备份架构
 
 ```
@@ -46,36 +26,36 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌───────────────┐     xtrabackup --stream=xbstream     ┌────────────────┐  │
-│  │   node-03     │ ─────────────────────────────────────►│  阿里云 OSS    │  │
+│  │   node-03     │ ────────────────────────────────────►│   阿里云 OSS    │  │
 │  │  MySQL Slave  │  每日 02:00, gzip 压缩, 推送           │  Bucket:       │  │
-│  │  (备份源)     │                                      │  k3s-backup-   │  │
+│  │  (备份源)      │                                      │  k3s-backup-   │  │
 │  │  super_read_  │                                      │  velero        │  │
 │  │  only=ON      │                                      │                │  │
 │  └───────────────┘                                      │  /mysql-backups│  │
-│                                                         │  /velero-backups│ │
+│                                                         │ /velero-backups│  │
 │  ┌───────────────┐   Velero FSB (kopia)                 │                │  │
-│  │  K8s cluster  │ ─────────────────────────────────────►│  保留: 7 天    │  │
-│  │  velero ns    │  每日 02:30, xtrabackup 之后          │  (~7GB 总量)   │  │
-│  │  node-agent   │  data-layer + app-layer               │  Lifecycle Rule│  │
-│  │  (DaemonSet)  │  Redis 3 PVC via FSB                  └───────┬────────┘  │
-│  └───────────────┘                                              │           │
-│                                                                 │           │
-│  恢复路径:                                                      │           │
-│    MySQL:  OSS → 下载 → xtrabackup --prepare → --copy-back     │           │
-│            → chown → 启动 mysqld → GTID 自动接续复制             │           │
-│                                                                 │           │
-│    K8s:    velero restore create → 重建 PVC → node-agent       │           │
-│            从 OSS 下载 kopia 快照 → 恢复 Redis 数据              │           │
-└─────────────────────────────────────────────────────────────────┘           │
-                                                                              │
-  节点分布:                                                                    │
-  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                       │
-  │  node-01     │  │  node-02     │  │  node-03     │                       │
-  │  2C2G        │  │  2C4G        │  │  2C4G        │                       │
-  │  FluxCD      │  │  MySQL M     │  │  MySQL S     │                       │
-  │  互联网出口    │  │  Velero Srv  │  │  xtrabackup  │                       │
-  │              │  │              │  │  (备份源)     │                       │
-  │  node-agent  │  │  node-agent  │  │  node-agent  │                       │
+│  │  K8s cluster  │ ────────────────────────────────────►│   保留: 7 天    │  │
+│  │  velero ns    │  每日 02:30, xtrabackup 之后           │  (~7GB 总量)   │  │
+│  │  node-agent   │  data-layer + app-layer               │ Lifecycle Rule│  │
+│  │  (DaemonSet)  │  Redis 3 PVC via FSB                  └───────┬───────┘  │
+│  └───────────────┘                                               │          │
+│                                                                  │          │
+│  恢复路径:                                                        │          │
+│    MySQL:  OSS → 下载 → xtrabackup --prepare → --copy-back        │          │
+│            → chown → 启动 mysqld → GTID 自动接续复制                │          │
+│                                                                  │          │
+│    K8s:    velero restore create → 重建 PVC → node-agent          │          │
+│            从 OSS 下载 kopia 快照 → 恢复 Redis 数据                 │          │
+├──────────────────────────────────────────────────────────────────┘          │
+│                                                                             │
+│  节点分布:                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                       │
+│  │  node-01     │  │  node-02     │  │  node-03     │                       │
+│  │  2C2G        │  │  2C4G        │  │  2C4G        │                       │
+│  │  FluxCD      │  │  MySQL M     │  │  MySQL S     │                       │
+│  │  互联网出口    │  │  Velero Srv  │  │  xtrabackup  │                       │
+│  │              │  │              │  │  (备份源)     │                       │
+│  │  node-agent  │  │  node-agent  │  │  node-agent  │                       │
 │  └──────────────┘  └──────────────┘  └──────────────┘                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -291,7 +271,7 @@ endpoint = {{ oss_endpoint }}
 
 - 依赖 `/root/.my.cnf` 认证（不传 `--user`/`--password` 以防默认值覆盖 my.cnf）
 - 添加 `--safe-slave-backup` 暂停 SQL 线程确保 binlog 位置一致
-- `MYSQL_PASSWORD` 默认值改为 `""`（原 `CHANGE_ME` 会覆盖 my.cnf）
+- `MYSQL_PASSWORD` 默认值改为 `""`
 
 ```bash
 #!/usr/bin/env bash

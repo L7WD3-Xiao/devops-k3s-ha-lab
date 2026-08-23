@@ -630,7 +630,7 @@ kubectl exec -n data-layer redis-1 -- redis-cli GET phase3-test
 **数据流：**
 ```
 应用 ──► ProxySQL:6033 ──┬─► HG1 (writer) → 192.168.1.230 (Master node-02)
-                          └─► HG2 (reader) → 192.168.1.229 (Slave  node-03)
+                        └─► HG2 (reader) → 192.168.1.229 (Slave  node-03)
 
 Orchestrator:3000 ──► 监控 MySQL 拓扑 ──► Master 故障时自动提升 Slave
                                     └──► 通知 ProxySQL 切换路由
@@ -961,3 +961,9 @@ kubectl exec -n data-layer deploy/proxysql -- mysql -h 127.0.0.1 -P 6032 -u admi
 | sentinel-1 | node-03 | 10.42.2.10 | Sentinel |
 | sentinel-2 | node-01 | 10.42.0.38 | Sentinel |
 
+## 5. 拓展阅读
+
+- [幂等性是什么？一文读懂高并发下的幂等性实现方案！ - 知乎](https://zhuanlan.zhihu.com/p/721671925)
+- [深入解析MySQL GTID主从复制的原理、部署与核心避坑策略 - wgwyanfs - 博客园](https://www.cnblogs.com/wgwyanfs/p/19808265)
+- [深入理解Redis哨兵（Sentinel）原理：高可用架构的核心守护者-腾讯云开发者社区-腾讯云](https://cloud.tencent.com/developer/article/2628989)
+- 

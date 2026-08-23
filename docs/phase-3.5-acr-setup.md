@@ -1,4 +1,4 @@
-# Phase 4 准备：阿里云 ACR 镜像仓库配置
+# Phase 3.5：阿里云 ACR 镜像仓库配置
 
 > 日期：2026-07-21
 > 状态：配置文件已就绪，凭证已填入（脱敏模板已入库）
@@ -16,7 +16,6 @@
 | 运维 | 零运维 | 需维护 Harbor 实例 |
 | 可用性 | 阿里云 SLA 保证 | 自负可用性 |
 | VPC 集成 | 原生 VPC 内网拉取 | 需额外配置 |
-| 安全扫描 | 个人版不支持 | 支持 Trivy 集成 |
 
 项目定位是校招简历级基础设施项目，ACR 个人版免费且零运维，是最优选择。
 
@@ -28,10 +27,12 @@
 | 仓库数 | 50 个 | 不限 |
 | 认证 | 固定账号密码 | RAM 用户/临时凭证 |
 | VPC 内网拉取 | **支持** | 支持 |
-| 镜像安全扫描 | 不支持 | 支持 |
+| 镜像安全扫描 | 不支持 ACR 原生扫描 | 支持 |
 | 跨 Region 同步 | 不支持 | 支持 |
 
 **选择个人版**——3 个 namespace、50 个仓库对这个项目绰绰有余，VPC 内网拉取同样支持。
+
+> **个人版**不支持 ACR 原生扫描，但可集成 Trivy。[详见phase-5-CI/CD篇](phase-5-cicd.md)
 
 ### 1.3 新个人版 vs 旧个人版域名格式
 
@@ -56,8 +57,8 @@
 本项目 ACR 实例的两个域名：
 
 ```
-公网:  crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com       ← 本地推送（开发机）
-VPC:   crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com   ← K3s 拉取（ECS 内网，免费）
+公网:  crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com       ← 本地推送（开发机）
+VPC:   crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com   ← K3s 拉取（ECS 内网，免费）
 ```
 
 **3 台 ECS 和 ACR 都在 cn-hangzhou region，K3s 用 VPC 域名**，零流量费且延迟更低。
@@ -69,10 +70,10 @@ VPC:   crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com   ← K3s 
 
 ```
 # 推送时（从本地开发机，走公网）
-crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
+crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
 
 # 拉取时（K3s 集群，走 VPC 内网，免费）
-crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
+crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:v1
 ```
 
 > 同一个镜像在 ACR 中只有一份存储，公网域名和 VPC 域名指向同一个 manifest。
@@ -170,9 +171,9 @@ Step 4: 端到端验证 ──────► 本地推镜像 → K3s VPC 拉取
 **变量内容**：
 ```yaml
 # VPC 域名（K3s 拉取用，免费·低延迟）
-acr_registry: "crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com"
+acr_registry: "crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com"
 # 公网域名（本地开发机推送用）
-acr_registry_public: "crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com"
+acr_registry_public: "crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com"
 acr_namespace: "shortlink123"
 acr_repository: "shortlink-app"
 acr_username: "<your-username>"   # 阿里云账号或 RAM 子账号
@@ -257,11 +258,8 @@ sudo cat /etc/rancher/k3s/registries.yaml | grep -A3 configs
 sudo /usr/local/bin/k3s kubectl get nodes
 
 # 验证 VPC 端点可达
-curl -I https://crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/v2/
+curl -I https://crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com/v2/
 ```
-
----
-<!-- build-push.sh 步骤已移入 phase-4-app-deploy.md Step 1 -->
 
 ---
 
@@ -274,21 +272,21 @@ curl -I https://crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/v
 ```bash
 # 1. 本地推送测试镜像（走公网）
 docker pull hello-world
-docker tag hello-world crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
-docker push crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
+docker tag hello-world crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
+docker push crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test
 
 # 2. K3s 用 VPC 域名拉取（免费·内网）
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl run acr-test \
-  --image=crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test"
+ssh k3s-node-01
+sudo /usr/local/bin/k3s kubectl run acr-test --image=crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123/shortlink-app:test"
 
 # 3. 确认 Pod 运行
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get pods acr-test"
+sudo /usr/local/bin/k3s kubectl get pods acr-test
 
 # 4. 查看日志
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl logs acr-test"
+sudo /usr/local/bin/k3s kubectl logs acr-test
 
 # 5. 清理测试 Pod
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl delete pod acr-test"
+sudo /usr/local/bin/k3s kubectl delete pod acr-test
 ```
 
 **验证指标**：

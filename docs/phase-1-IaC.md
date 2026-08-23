@@ -11,16 +11,16 @@
 
 使用 **Terraform** 在阿里云杭州地域创建全新的 VPC + 3 台 ECS 实例，组成 K3s HA 集群的物理基础设施。通过 cloud-init 完成系统初始化，node-01 绑定按量 EIP 提供互联网出口和 SSH 直连。
 
-### 1.2 方案变更说明
+### 1.2 方案说明
 
-| 项目 | 原方案（已废弃） | 实际方案 |
-|------|----------------|---------|
-| VPC | 复用 SWAS VPC (172.16.0.0/12) | **新建 VPC (192.168.0.0/16)** |
-| vSwitch | 复用 vsw-bp171csb7bkm1n0156f3b (cn-hangzhou-i) | **新建 vswitch (192.168.1.0/24, cn-hangzhou-h)** |
-| node-01 | 复用现有 SWAS 实例 (import) | **新建 ECS** |
-| 公网访问 | SWAS 做 Jump Host (47.114.124.150) | **node-01 绑按量 EIP (<集群公网入口IP>)** |
-| 实例规格 | 3 台全部 2C2G | **node-01 2C2G, node-02/03 2C4G**（Phase 3 前升级） |
-| 密钥对 | 控制台预创建 | **Terraform 自动创建并导入公钥** |
+| 项目 | 方案 |
+|------|---------|
+| VPC | **新建 VPC (192.168.0.0/16)** |
+| vSwitch | **新建 vswitch (192.168.1.0/24, cn-hangzhou-h)** |
+| node-01 | **新建 ECS** |
+| 公网访问 | **node-01 绑按量 EIP ** |
+| 实例规格 | **3 x 2C4G** |
+| 密钥对 | **Terraform 自动创建并导入公钥** |
 
 ### 1.3 产出物
 
@@ -42,12 +42,9 @@
 
 | 节点 | 实例类型 | vCPU | 内存 | 系统盘 | 内网 IP | EIP | K3s 角色 |
 |------|---------|------|------|--------|---------|-----|---------|
-| k3s-node-01 | ecs.e-c1m1.large | 2 | 2 GiB | 40 GB ESSD Entry | 192.168.1.228 | <集群公网入口IP> | server + etcd |
+| k3s-node-01 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.228 | <集群公网入口IP> | server + etcd |
 | k3s-node-02 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.230 | — | server + etcd |
 | k3s-node-03 | ecs.e-c1m2.large | 2 | 4 GiB | 40 GB ESSD Entry | 192.168.1.229 | — | server + etcd |
-
-> node-01 保持 2C4G（仅跑 K3s 控制面 + FluxCD + Velero，不跑 MySQL）。
-> node-02/03 在 Phase 3 前升级到 2C4G（跑 MySQL 物理机主从，2C4G 内存余量 <200MB 有 OOM 风险）。
 
 ### 2.2 网络拓扑
 
@@ -175,8 +172,8 @@ variable "vswitch_cidr"  { default = "192.168.1.0/24" }
 variable "zone_id"       { default = "cn-hangzhou-h" }
 
 # ── 实例规格 ──
-variable "instance_type"          { default = "ecs.e-c1m1.large" }  # 2C4G, node-01
-variable "instance_type_upgraded" { default = "ecs.e-c1m2.large" }  # 2C4G, node-02/03
+variable "instance_type"          { default = "ecs.e-c1m1.large" }  # 2C2G
+variable "instance_type_upgraded" { default = "ecs.e-c1m2.large" }  # 2C4G
 
 # ── 镜像 ──
 # 留空则自动查询：name_regex = "^aliyun_3_x64_20G_alibase_"
@@ -213,25 +210,7 @@ alicloud_vpc.k3s                    ── 新建 VPC
 > 每个实例 resource block 使用 `count = var.create_node_XX ? 1 : 0` 控制是否创建。
 > outputs.tf 中用 `length(alicloud_instance.k3s_node_XX) > 0` 判断是否有值。
 
-### 3.5 `user-data.sh` — cloud-init 初始化
 
-```bash
-#!/bin/bash
-# cloud-init user-data for K3s cluster nodes (templatefile 渲染)
-# 关键步骤：
-# 1. 关闭 swap (k8s明确要求)
-# 2. 内核参数 (ip_forward, bridge-nf-call-iptables)
-# 3. 安装基础包 (dnf)
-# 4. 时区 Asia/Shanghai + chronyd
-# 5. 创建 ops 用户 + sudo NOPASSWD
-# 6. 配置 ops SSH 公钥
-# 7. 禁用 firewalld
-# 8. 标记完成 /tmp/cloud-init-k3s-done
-```
-
-> **踩坑修复**：Alibaba Cloud Linux 3 (RHEL 8 系) 包名 `iproute` 而非 `iproute2`（Debian 系）。cloud-init 首次执行时 `dnf install iproute2` 失败，改为 `iproute` 后通过。
->
-> 关闭 swap 出于集群性能考虑：[k8s优化之关闭swap - Leo_Yide - 博客园](https://www.cnblogs.com/leojazz/p/18932239)
 
 ---
 
@@ -240,19 +219,19 @@ alicloud_vpc.k3s                    ── 新建 VPC
 > 执行顺序严格按依赖关系排列：必须先创建网络基础设施，后创建 ECS 实例。规格升级可选，按需在 Phase 3 前执行。
 
 ```
-Step 1: Terraform 项目 ────► 编写 main.tf / variables.tf / outputs.tf / user-data.sh
+Step 1: 准备工作 ──────────► 安装 Terraform 并创建阿里云 AccessKey 
     │
     ▼
-Step 2: 网络基础设施 ──────► VPC + VSwitch + 安全组 + SSH 密钥对（0 元）
+Step 2: Terraform 项目 ────► 编写 main.tf / variables.tf / outputs.tf / user-data.sh
     │
     ▼
-Step 3: node-01 ──────────► ECS + EIP（cloud-init 初始化）
+Step 3: 网络基础设施 ──────► VPC + VSwitch + 安全组 + SSH 密钥对（0 元）
     │
     ▼
-Step 4: node-02/03 ───────► 两台 ECS 纯内网节点
+Step 4: node-01 ──────────► ECS + EIP（cloud-init 初始化）
     │
     ▼
-Step 5: 规格升级 ──────────► node-02/03 2C4G → 2C4G（可选，按需执行）
+Step 5: node-02/03 ───────► 两台 ECS 纯内网节点
 ```
 
 ---
@@ -304,8 +283,6 @@ winget install --id HashiCorp.Terraform --accept-source-agreements --accept-pack
 
 `terraform/terraform.tfvars` 模板
 
-> 默认全部 false 是指在 `terraform\variables.tf` 中这些变量设置了 default = false
-
 ```shell
 # ═══ 分步创建控制（默认全部 false，按阶段手动开启）═══
 # Phase A: 全部 false → VPC + 安全组 + 密钥（免费）
@@ -318,8 +295,10 @@ create_node_03 = true
 create_eip     = true
 
 # ═══ Ops 用户公钥 ═══
-ops_pubkey = "change-it"
+ops_pubkey = "CHANGE-ME"
 ```
+
+> 默认全部 false 是指在 `terraform\variables.tf` 中这些变量设置了 default = false
 
 `terraform/setenv.sh` 模板
 
@@ -327,8 +306,8 @@ ops_pubkey = "change-it"
 #!/bin/bash
 # Alibaba Cloud credentials for Terraform
 # This file is gitignored — do NOT commit
-export ALICLOUD_ACCESS_KEY="change-it"
-export ALICLOUD_SECRET_KEY="change-it"
+export ALICLOUD_ACCESS_KEY="CHANGE-ME"
+export ALICLOUD_SECRET_KEY="CHANGE-ME"
 export ALICLOUD_REGION="cn-hangzhou"
 ```
 
@@ -354,7 +333,7 @@ terraform validate         # 配置语法正确
 
 ```bash
 # 修改terraform.tfvars: 全部 create_* = false
-# 看一下当前配置如果执行了，会有什么改动
+# 看一下当前配置将会进行什么改动
 terraform plan
 
 # 应用配置
@@ -381,7 +360,7 @@ terraform state list         # 仅有 VPC/VSwitch/SG/KeyPair
 
 ### Step 4: node-01 + EIP
 
-**目标**：创建首台 ECS 实例（node-01）并绑定按量 EIP，提供 SSH 直连和互联网出口。费用 +~45 元/月。
+**目标**：创建首台 ECS 实例（node-01）并绑定按量 EIP，提供 SSH 直连和互联网出口。并通过`user-data.sh`初始化节点（功能见下方）。费用 +~45 元/月。
 
 ```bash
 # terraform.tfvars: create_node_01 = true, create_eip = true
@@ -396,22 +375,43 @@ terraform apply
 | 内网 IP | 192.168.1.228 | — |
 | EIP | <集群公网入口IP> | PayByTraffic, 10Mbps 带宽上限 |
 
-**修改文件**：
+#### cloud-init 初始化：`terraform/user-data.sh`
 
-| 文件 | 变更 | 原因 |
-|------|------|------|
-| `terraform/user-data.sh` | `iproute2` → `iproute` | Alibaba Cloud Linux 3 (RHEL 系) 包名为 `iproute`，非 Debian 系的 `iproute2` |
+用于初始化节点，在 `main.tf` 中通过以下配置调用，`ops_pubkey` 作为参数传递给脚本：
 
-> **踩坑**：cloud-init 首次执行失败 — `dnf install iproute2` 包名错误。修复 `user-data.sh` 后重新 `terraform apply`，问题解决。后续节点（Step 4）不受影响。
+```json
+resource "alicloud_instance" "k3s_node_01" {
+  instance_name              = "k3s-node-01"
+
+  user_data = templatefile("${path.module}/user-data.sh", {
+    ops_user   = var.ops_user
+    ops_pubkey = var.ops_pubkey
+  })
+}
+```
+
+**脚本功能**：
+
+1. 关闭 swap (k8s明确要求)
+2. 内核参数 (ip_forward, bridge-nf-call-iptables)
+3. 安装基础包 (dnf)
+4. 时区 Asia/Shanghai + chronyd
+5. 创建 ops 用户 + sudo NOPASSWD
+6. 配置 ops SSH 公钥
+7. 禁用 firewalld
+8. 标记完成 `/tmp/cloud-init-k3s-done`
+
+> **踩坑修复**：Alibaba Cloud Linux 3 (RHEL 8 系) 包名 `iproute` 而非 `iproute2`（Debian 系）。cloud-init 首次执行时 `dnf install iproute2` 失败，改为 `iproute` 后通过。
+>
+> 关闭 swap 出于集群性能考虑：[k8s优化之关闭swap - Leo_Yide - 博客园](https://www.cnblogs.com/leojazz/p/18932239)
 
 **验证**：
+
 ```bash
 ssh -i k3s-cluster-key ops@<集群公网入口IP>   # SSH 直连成功
 hostname                                        # k3s-node-01
 free -h                                         # Swap = 0
 cat /tmp/cloud-init-k3s-done                   # cloud-init 标记存在
-# cloud-init 完成检查
-sudo cat /var/log/cloud-init-output.log        # 无报错
 ```
 
 ---

@@ -4,14 +4,12 @@
 
 对 K3s 集群进行纵深防御安全加固，覆盖身份认证（RBAC）、网络隔离（NetworkPolicy）、容器安全（SecurityContext + PSS）、CI 镜像扫描（Trivy）、密钥管理（Secret 迁移）、资源配额（ResourceQuota）六大领域。
 
-**状态：计划已就绪，待执行**
-
 ## 2. 安全分层架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        外部流量                                    │
-│                    (Internet → EIP:80)                           │
+│                        外部流量                                  │
+│                    (Internet → EIP:80)                          │
 └───────────────────────┬─────────────────────────────────────────┘
                         │
                 ┌───────▼────────┐
@@ -24,7 +22,7 @@
 ┌───────▼──────┐ ┌──────▼──────┐ ┌──────▼───────┐
 │  app-layer   │ │  data-layer │ │  flux-system │
 │  restricted  │ │  baseline   │ │  (自带 NP)    │
-│  PSS 级别     │ │  PSS 级别    │ │              │
+│  PSS 级别     │ │  PSS 级别   │ │              │
 ├──────────────┤ ├─────────────┤ ├──────────────┤
 │ shortlink    │ │ Redis x3    │ │ source-ctrl  │
 │ (UID 10001)  │ │ Sentinel x3 │ │ kustomize    │
@@ -42,7 +40,7 @@
 ├──────────────┤ ├─────────────┤
 │ NetworkPolicy│ │NetworkPolicy│
 │  deny ingress│ │ deny all    │
-│  allow traefik│ │ allow app   │
+│ allow traefik│ │ allow app   │
 │  allow data  │ │ allow redis │
 │  allow dns   │ │ allow mysql │
 └──────┬───────┘ └──────┬──────┘

@@ -10,7 +10,7 @@
 #             CI passes this; local builds default to "dev"
 #
 # NOTE: On node-01 (no Docker Hub access), build with daocloud mirror URLs:
-#   docker.m.daocloud.io/library/golang:1.23-alpine
+#   docker.m.daocloud.io/library/golang:1.26-alpine
 #   docker.m.daocloud.io/library/alpine:3.21
 # The build-push.sh script handles this substitution automatically.
 FROM golang:1.26-alpine AS builder

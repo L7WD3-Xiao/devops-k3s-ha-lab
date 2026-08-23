@@ -120,8 +120,8 @@ flux install \
 #    （一次搬运，后续升级时重复；用 crane 而非 nerdctl pull，
 #     因为 node-01 容器运行时无外网代理，详见下方备注）
 # ──────────────────────────────────────────────────
-ACR_PUBLIC="crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123"
-ACR_VPC="crpi-vvz6iv4av6k8awep-vpc.cn-hangzhou.personal.cr.aliyuncs.com/shortlink123"
+ACR_PUBLIC="${ACR_REGISTRY_PUBLIC}/shortlink123"
+ACR_VPC="${ACR_REGISTRY}/shortlink123"
 
 # 每个 controller 有自己的版本（不是统一 FLUX_TAG）
 declare -A TAGS=(
@@ -196,7 +196,7 @@ kubectl get pods -n flux-system -o wide | awk '{print $1, $7}'
 # 1. 在 GitHub 创建 Private 仓库 k3s-shortlink
 
 # 2. 本地添加 SSH remote（如已用 HTTPS clone，需修改 remote）
-git remote set-url origin git@github.com:L7WD3/k3s-shortlink.git
+git remote set-url origin git@github.com:{your-repo-url}
 
 # 3. 生成 deploy key（用于 CI push tag 更新）
 ssh-keygen -t ed25519 -f ~/.ssh/github-actions -C "github-actions[bot]"
@@ -511,7 +511,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/github-actions -C "github-actions[bot]"
 
 > 使用 SSH 而非 HTTPS+PAT 的原因（验证清单 #1）：Classic PAT 无 `workflow` scope 时无法修改 `.github/workflows/` 文件。SSH git remote 无此限制。
 
-**go.sum 要求**（验证清单 #7）：CI 中 `go vet` 需要完整的 `go.sum` 文件，必须已提交到 Git。如果缺失，在 node-01 上用 Go 1.22+ 直接运行 `go mod tidy` 生成（详见 §6.4）。
+**go.sum 要求**（验证清单 #7）：CI 中 `go vet` 需要完整的 `go.sum` 文件，必须已提交到 Git。如果缺失，在 node-01 上用 Go 1.26+ 直接运行 `go mod tidy` 生成（详见 §6.4）。
 
 **验证**：
 ```bash
@@ -542,7 +542,7 @@ git commit --allow-empty -m "[ci] test pipeline" && git push
 ```bash
 # 创建 ACR 凭证（使用公网域名）
 kubectl create secret docker-registry acr-credentials \
-  --docker-server=crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com \
+  --docker-server=crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com \
   --docker-username=<ACR_USERNAME> \
   --docker-password=<ACR_PASSWORD> \
   -n flux-system

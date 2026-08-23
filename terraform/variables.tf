@@ -35,13 +35,13 @@ variable "zone_id" {
 # ═══════════════════════════════════════════════
 
 variable "instance_type" {
-  description = "ECS 实例规格（node-01，升级到 2C4G 减轻内存压力）"
+  description = "ECS 实例规格（2C2G）"
   type        = string
   default     = "ecs.e-c1m2.large"
 }
 
 variable "instance_type_upgraded" {
-  description = "ECS 实例规格（node-02/03，跑 MySQL 物理机，需 2C4G）"
+  description = "ECS 实例规格（2C4G）"
   type        = string
   default     = "ecs.e-c1m2.large"
 }

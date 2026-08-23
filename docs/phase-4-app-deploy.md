@@ -12,19 +12,19 @@
                         External Traffic
                               │
                     ┌─────────▼─────────┐
-                    │  Traefik Ingress   │  (K3s 内置, :80)
+                    │  Traefik Ingress  │  (K3s 内置, :80)
                     └─────────┬─────────┘
                               │
-                    ┌─────────▼─────────┐
+                    ┌─────────▼──────────┐
                     │  shortlink Service │  (app-layer, :8080)
                     │  2 replicas + HPA  │
                     └────┬────────┬──────┘
                          │        │
           ┌──────────────▼──┐  ┌──▼───────────────────┐
-          │  ProxySQL:6033   │  │  Sentinel:26379       │
-          │  (data-layer)    │  │  (data-layer)         │
-          │  读写分离          │  │  Redis Master 发现     │
-          └────┬────────┬────┘  └──────────┬────────────┘
+          │  ProxySQL:6033  │  │   Sentinel:26379     │
+          │  (data-layer)   │  │  (data-layer)        │
+          │  读写分离         │  │  Redis Master 发现   │
+          └────┬────────┬───┘  └───────────┬──────────┘
                │        │                  │
         ┌──────▼──┐  ┌──▼──────┐    ┌──────▼──────┐
         │ MySQL   │  │ MySQL   │    │ Redis HA    │
@@ -39,7 +39,7 @@
 app/
   main.go              Go 短链服务源码 (Gin + MySQL + Redis, 358 行)
   go.mod               Go module 依赖
-Dockerfile             多阶段构建 (golang:1.22-alpine → alpine:3.20)
+Dockerfile             多阶段构建 (golang:1.26-alpine → alpine:3.20)
 .dockerignore          构建上下文排除
 k8s/app-layer/
   namespace.yaml       app-layer namespace
@@ -148,18 +148,15 @@ build-push.sh v1
 | `ACR_REGISTRY_PUBLIC` | `crpi-...` | 公网域名，推送用 |
 | `ACR_NAMESPACE` | `shortlink123` | ACR 命名空间 |
 | `ACR_REPOSITORY` | `shortlink-app` | 镜像仓库名 |
-| `ACR_USERNAME` | `L7WD3-Xiao` | ACR 登录用户名 |
-
-> ⚠️ 密码不保存在脚本或环境变量中——每次执行 `build-push.sh` 时**交互式输入**（docker/nerdctl login 均弹出密码提示）。
-> `ACR_USERNAME` 的默认值已脱敏，使用真实值即可。
+| `ACR_USERNAME` | `<username>` | ACR 登录用户名 |
 
 **验证**：
 
-> 如果开发机有 Docker Desktop 或 Docker 环境，就在本地验证，没有可以跳过
-
 ```bash
 # 本地 Docker login 测试（交互式输入密码）
-docker login crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com
+docker login crpi-{id}.cn-hangzhou.personal.cr.aliyuncs.com
+# 或在集群节点 nerdctl login 测试
+nerdctl login crpi-{id}-vpc.cn-hangzhou.personal.cr.aliyuncs.com
 # 输入密码后应显示 Login Succeeded
 ```
 
@@ -182,7 +179,7 @@ docker login crpi-vvz6iv4av6k8awep.cn-hangzhou.personal.cr.aliyuncs.com
 
 ```dockerfile
 # Build stage
-FROM docker.m.daocloud.io/library/golang:1.22-alpine AS builder
+FROM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
 WORKDIR /build
 COPY app/go.mod ./
 ENV GOPROXY=https://goproxy.cn
@@ -227,10 +224,7 @@ CMD ["./shortlink"]
 **验证**：
 ```bash
 # 确认 Dockerfile 语法正确
-docker build -f Dockerfile . --no-op 2>/dev/null || echo "Syntax check not available; use build-push.sh as next step"
-
-# 用 build-push.sh 一键构建+推送
-./scripts/build-push.sh v1
+nerdctl build -f Dockerfile . --no-op 2>/dev/null || echo "Syntax check not available; use build-push.sh as next step"
 ```
 
 ---
@@ -251,11 +245,27 @@ docker build -f Dockerfile . --no-op 2>/dev/null || echo "Syntax check not avail
 > - 两个域名指向 ACR 中的同一份镜像 manifest，推送到公网域名后，VPC 域名立即可见
 > - K3s registries.yaml 已配置 VPC 域名认证，全局免 imagePullSecret
 
+`build-push.sh` 流程：
+
+- 参数解析：`build-push.sh v1` 处的 `v1` 等
+- 选择 Container Tool （Docker 或 nerdctl+buildctl）
+- 准备 Dockerfile
+- 登录 ACR
+- 镜像构建 & 推送
+- 清理 Dockerfile
+- 总结
+
 **验证**：
+
 ```bash
+# 用 build-push.sh 一键构建+推送
+./scripts/build-push.sh v1
+
 # build-push.sh 执行成功后，确认 ACR 控制台镜像仓库中出现 v1 标签
 # 或查看脚本输出的 Summary 确认无报错
 ```
+
+> build-push.sh 兼容 docker 和 nerdctl+buildkitd 环境（集群环境），集群中已通过 Ansible 分发 ACR 凭证（详见 [phase-3.5 Step3](phase-3.5-acr-setup.md)），可直接登录 ACR，非集群环境运行 build-push.sh 需要手动配置环境变量。
 
 ---
 
@@ -289,20 +299,22 @@ cat k8s/app-layer/*.yaml | ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl appl
 
 **验证**：
 ```bash
+ssh k3s-node-01
+
 # 检查 Pod 状态
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get pods -n app-layer -o wide"
+sudo /usr/local/bin/k3s kubectl get pods -n app-layer -o wide
 
 # 确认 Deployment 已就绪（2/2 READY）
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl rollout status deploy/shortlink -n app-layer"
+sudo /usr/local/bin/k3s kubectl rollout status deploy/shortlink -n app-layer
 
 # 确认 Service 和 Endpoints
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get svc,ep -n app-layer"
+sudo /usr/local/bin/k3s kubectl get svc,ep -n app-layer
 
 # 确认 Ingress
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get ingress -n app-layer"
+sudo /usr/local/bin/k3s kubectl get ingress -n app-layer
 
 # 确认 HPA
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl get hpa -n app-layer"
+sudo /usr/local/bin/k3s kubectl get hpa -n app-layer
 ```
 
 ---
@@ -347,3 +359,8 @@ curl -v http://<集群公网入口IP>/6
 - `secret.yaml` 已加入 `.gitignore`，仅 `secret.yaml.example` 入库
 - 容器以非 root 用户（UID 10001）运行，SecurityContext 与 Dockerfile USER 一致
 - ConfigMap 只包含非敏感信息，敏感信息全部走 Secret
+
+## 6. 拓展阅读
+
+- [K8S的亲和与反亲和调度 - 知乎](https://zhuanlan.zhihu.com/p/658066049)
+
