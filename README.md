@@ -18,17 +18,17 @@
 
 本项目完整搭建了一套**生产级 K3s 高可用集群**，集成 **FluxCD GitOps** 持续部署与 **GitHub Actions** 持续集成，运行一个 Go 短链服务（Shortlink）。
 
-> 🎯 **定位**：面向 **DevOps / SRE 校招面试**的教学项目，覆盖容器化、Kubernetes、CI/CD、基础设施即代码等核心技能栈。
+> **定位**：面向 **DevOps / SRE 校招面试**的教学项目，覆盖容器化、Kubernetes、CI/CD、基础设施即代码等核心技能栈。
 
 | 知识点 | 涵盖内容 |
 |--------|---------|
-| 🐳 **容器化** | Docker 多阶段构建、镜像瘦身（~7.5MB）、ACR 镜像仓库管理 |
-| ☸️ **Kubernetes** | K3s HA 部署、Pod 调度、HPA、PDB、Ingress、ConfigMap、Secret |
-| 🔄 **CI/CD** | GitHub Actions 流水线、FluxCD GitOps 声明式部署、镜像自动更新 |
-| 🗄️ **数据层** | MySQL 读写分离（ProxySQL）、Redis 哨兵模式高可用、Orchestrator 故障切换 |
-| 🌐 **网络** | VPC 内网、Traefik Ingress、SSH 反向隧道、ACR 双域名策略 |
-| 🔐 **安全** | 非 root 运行、Secret 管理、SSH 部署密钥、最小权限原则 |
-| 📐 **架构** | 高可用设计、故障域隔离、漂移纠正、滚动更新、优雅关闭 |
+| **容器化** | Docker 多阶段构建、镜像瘦身（~7.5MB）、ACR 镜像仓库管理 |
+| **Kubernetes** | K3s HA 部署、Pod 调度、HPA、PDB、Ingress、ConfigMap、Secret |
+| **CI/CD** | GitHub Actions 流水线、FluxCD GitOps 声明式部署、镜像自动更新 |
+| **数据层** | MySQL 读写分离（ProxySQL）、Redis 哨兵模式高可用、Orchestrator 故障切换 |
+| **网络** | VPC 内网、Traefik Ingress、SSH 反向隧道、ACR 双域名策略 |
+| **安全** | 非 root 运行、Secret 管理、SSH 部署密钥、最小权限原则 |
+| **架构** | 高可用设计、故障域隔离、漂移纠正、滚动更新、优雅关闭 |
 
 ---
 
@@ -77,7 +77,7 @@
 │  │ FluxCD ×6   │  │  Shortlink Pod    │  Shortlink Pod    │
 │  │AntiAffinity │  │  AntiAffinity     │  AntiAffinity     │
 │  ├─────────────┤  │                   │                   │
-│  │etcd + 控制面 │  │  etcd + 控制面     │  etcd + 控制面     │
+│  │etcd + 控制面 │  │  etcd + 控制面    │  etcd + 控制面     │
 │  └─────────────┘  │                   │                   │
 │  公网IP ✅        │                   │                   │
 └───────────────────┴───────────────────┴───────────────────┘
@@ -220,14 +220,14 @@ git push (app/ 或 Dockerfile 变更)
 
 | Phase | 内容 | 关键产出 |
 |-------|------|---------|
-| **Phase 1** 🏛️ | IaC：Terraform 基础设施创建 | 新建 VPC + 3 ECS + EIP + 安全组，cloud-init 初始化 |
-| **Phase 2** ☸️ | K3s HA 集群部署 | Ansible Playbook 一键部署 K3s HA（embedded etcd） |
-| **Phase 3** 🗄️ | 数据层部署 | MySQL 物理机主从 + Orchestrator + ProxySQL + Redis Sentinel |
-| **Phase 4** 🚀 | 应用部署 | 短链服务 Go + Gin、多阶段构建、Traefik Ingress + ACR |
-| **Phase 5** 🔄 | CI/CD 流水线 | GitHub Actions + FluxCD GitOps |
-| **Phase 6** 🔒 | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描 |
-| **Phase 7** 💾 | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
-| **Phase 8** 📊 | HTTPS + 数据库自动巡检 | cert-manager 自签 CA（私有 PKI）+ 7 维度 MySQL 自动巡检 → OSS 趋势留存 |
+| **Phase 1** | IaC：Terraform 基础设施创建 | 新建 VPC + 3 ECS + EIP + 安全组，cloud-init 初始化 |
+| **Phase 2** | K3s HA 集群部署 | Ansible Playbook 一键部署 K3s HA（embedded etcd） |
+| **Phase 3** | 数据层部署 | MySQL 物理机主从 + Orchestrator + ProxySQL + Redis Sentinel |
+| **Phase 4** | 应用部署 | 短链服务 Go + Gin、多阶段构建、Traefik Ingress + ACR |
+| **Phase 5** | CI/CD 流水线 | GitHub Actions + FluxCD GitOps |
+| **Phase 6** | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描 |
+| **Phase 7** | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
+| **Phase 8** | HTTPS + 数据库自动巡检 | cert-manager 自签 CA（私有 PKI）+ 7 维度 MySQL 自动巡检 → OSS 趋势留存 |
 
 各 Phase 详细文档在 [`docs/`](docs/) 目录，包含完整的**踩坑记录**（涵盖国内网络环境下的各种实际问题）。
 
