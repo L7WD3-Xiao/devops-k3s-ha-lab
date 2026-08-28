@@ -439,7 +439,7 @@ ssh k3s-node-01 "pkill -f 'pt-heartbeat.*--update'"
 ssh k3s-node-01 "mysql -h 192.168.1.230 -u root -p -e 'DROP DATABASE percona; DROP DATABASE test_repl'"
 ```
 
-> ⚠️ **心跳进程需常驻**：`--update` 进程停止后，Slave 端读到的时间戳不再更新，`--monitor` 数值会虚增，因此 pt-heartbeat 作为长期监控手段时需将 Master 侧进程注册为 systemd 服务或常驻进程；一次性验证完成即停。
+> ⚠️ **心跳进程需常驻**：`--update` 进程停止后，Slave 端读到的时间戳不再更新，`--monitor` 数值会虚增，因此 pt-heartbeat 作为长期监控手段时需将 Master 侧进程注册为 systemd 服务或常驻进程；**此处一次性验证，完成即停。**
 
 **验证指标**：
 

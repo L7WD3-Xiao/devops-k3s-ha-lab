@@ -30,8 +30,8 @@
 
 - 任一节点故障控制面与业务均不中断。
 - MySQL 复制延迟 < 1s，Orchestrator 自动切换；Redis failover < 10s，原 key 可读。
-- CI/CD 全自动化，git push 到生产上线 < 5min。
-- 双链路备份到 OSS，7 天保留，恢复流程已验证。
+- CI/CD 全自动化，git push 到生产上线 ~ 4min。
+- 双链路备份到 OSS，7 天保留；MySQL 全量备份窗口 ~6min（10GB 规模）、恢复演练 RTO ~25min。
 - 全链路 IaC——Terraform 基础设施 + Ansible 集群部署 + FluxCD GitOps——环境可一键复现。
 - 全站 HTTPS 加密，证书 90 天自动续签；数据库运维可观测，每周结构化巡检 + OSS 趋势留存。
 
@@ -310,7 +310,9 @@ GitOps 的核心优势：**回滚 = git revert**，不需要 kubectl rollout und
 - **MySQL**：从 OSS 下载备份 → `xtrabackup --prepare`（应用 redo log）→ `xtrabackup --copy-back` → `chown mysql:mysql` → 启动 mysqld → GTID auto-positioning 重建复制。已写好 Ansible playbook 自动化
 - **K8s + Redis**：`velero restore create` → 自动重建 PVC → node-agent kopia 从 OSS 恢复数据到 PVC → Redis StatefulSet 启动恢复
 
-**追问：恢复演练过吗？怎么验证的？** 恢复演练流程已经文档化，分两步：MySQL 侧用 `ansible-playbook 05-restore-mysql.yml` 执行（设置测试数据 → 模拟恢复 → 验证 COUNT(*) 一致），K8s 侧用 `velero restore` 验证（设置 Redis key → 删 StatefulSet+PVC → 恢复 → 验证 key 可读）。
+**追问：恢复演练过吗？怎么验证的？** 恢复演练流程已经文档化并写成 playbook：MySQL 侧用 `05-restore-mysql-drill.yml` 演练、`05-restore-mysql-dr.yml` 承接真实灾难（容错：mysqld 已宕机、datadir 缺失、工具/空间前置检查），K8s 侧用 `06-restore-redis.yml` 自动化 Velero 恢复（设置 Redis key → 删 StatefulSet+PVC → 恢复 → 验证 key 可读）。
+
+> 备份/恢复用时追问见 Q24
 
 ---
 
@@ -498,5 +500,115 @@ FluxCD v2.9.2 的 ImageUpdateAutomation 有 Setters 策略 Bug，不管你设什
    - 目的不是改多少东西，而是**学会团队的变更规范**
 
 **核心原则**：SRE 的第一要务是**不引入故障**，不是证明自己多能干。
+
+---
+
+### 【量化指标类】
+
+> 简历上写出的每一个数字，面试官都可能要求你给出测量方法、构成分解和打破条件。本节针对 Result 部分的量化指标逐条深挖。备份此前未量化，Q24 为**拟设场景**（数字基于 2C4G 硬件合理推算，实际面试前应在集群上自测校准后写入简历）。
+
+---
+
+#### Q21: 简历写"MySQL 复制延迟 < 1s"——这个数字怎么测出来的？
+
+**回答要点：**
+
+两套测量方案，粗精互补（对应 phase-3 Step 6 的延迟测量步骤）：
+
+| 方案 | 精度 | 用途 |
+|------|------|------|
+| `Seconds_Behind_Master` 循环采样 | 秒级 | 日常巡检、快速确认复制线程健康 |
+| `pt-heartbeat --monitor` | 0.01s 亚秒级 | 精确测量端到端真实延迟 |
+
+- **口径**：`Seconds_Behind_Master` 10 次采样恒为 0；`pt-heartbeat --monitor` 当前延迟 0.0x s，1min/5min 均值 ≤ 0.1s → 汇总为"复制延迟 < 1s"
+- **为什么必须用 pt-heartbeat**：`Seconds_Behind_Master` 取的是"SQL 线程正在回放的事件"的时间戳，IO 线程有积压但 SQL 线程追平时仍显示 0，且空闲时恒为 0、粒度只有整秒——它只能证明"没有秒级以上的延迟"，不能证明延迟真的接近 0
+- **压力下也验证过**：Master 循环写入 1000 行，`--monitor` 观察延迟短暂上升后回落至 ~0
+
+**追问：什么情况下这个 <1s 会被打破？** 三种典型场景：① 大事务——单条 INSERT 10 万行的 binlog 事件，Slave 单线程回放耗时等于 Master 执行耗时，延迟瞬间抬高；② Slave 单 SQL 线程瓶颈——本项目未开启并行复制（`replica_parallel_workers`），写入 QPS 高时会积压，但短链写入低频，单线程足够；③ 磁盘 IO 竞争——xtrabackup 备份期间 Slave 读 IO 饱和，延迟会上升，所以备份放凌晨低峰。主动讲出"我调低了复杂度：数据量小 + 写入低频，不值得为亚秒延迟引入并行复制/MGR"，比堆参数更能体现判断力。
+
+---
+
+#### Q22: "Redis failover < 10s"——这 10 秒里每一段耗时是多少？
+
+**回答要点：**
+
+10s 不是拍的，是按参数逐段分解后留了余量的：
+
+| 阶段 | 耗时 | 参数依据 |
+|------|------|----------|
+| 主观下线判定 | 5s | `down-after-milliseconds=5000` |
+| 客观下线 + Sentinel Leader 选举 | ~1-2s | 3 Sentinel 内网 RTT < 1ms |
+| 提升 Slave（`SLAVEOF NO ONE`） | < 1s | 内存操作 |
+| 其余 Slave 重新同步新 Master | ~2s | `parallel-syncs=1`，数据量小全量同步快 |
+| 客户端感知新 Master 地址 | ~1s | shortlink 通过 Sentinel 定期刷新拓扑 |
+
+实测触发手动 failover 到新 Master 可写约 7s，简历写 < 10s 留了余量。
+
+**追问 1：能不能优化到 5s？代价是什么？** 把 `down-after-milliseconds` 调到 2s，判定提前 3s。代价是误判风险上升——瞬时网络抖动/主进程 GC 停顿超过 2s 就会触发无谓切换，每次切换本身有写入闪断。生产上 5s 是"快速切换"和"防误判"的常见折中。
+
+**追问 2：failover 窗口内会丢数据吗？** 可能丢——Redis 主从是异步复制，被提升的 Slave 可能落后原 Master 几条未同步的写命令。但本架构中 Redis 只是缓存层（MySQL 才是数据源），丢的写会在缓存未命中时从 MySQL 重建，业务无感知。能讲清"技术上会丢 + 架构上可接受 + 为什么"三层，是这个指标最有价值的展开。
+
+**追问 3：为什么 `parallel-syncs=1`？** 多个 Slave 同时对新 Master 全量同步会打爆其 CPU/带宽（Redis 全量同步 = RDB 生成 + 传输），逐个同步牺牲收敛速度换新 Master 稳定。
+
+---
+
+#### Q23: "git push 到生产上线 ~4min"——4 分钟花在哪？还能再压吗？
+
+**回答要点：**
+
+| 阶段 | 耗时 | 说明 |
+|------|------|------|
+| go vet + go test | ~60s | 单测量小，Actions 缓存 module 后更快 |
+| docker buildx 多阶段构建 | ~80s | Go 编译是大头（GOMODCACHE 缓存后 ~60s） |
+| push ACR | ~15s | 最终镜像仅 7.5MB |
+| Trivy 扫描 | ~20s | 漏洞库增量更新 |
+| sed + git commit/push | ~5s | 更新 kustomization newTag |
+| FluxCD 检测新 commit | 0-60s | SourceController 默认轮询 1min，均值 ~30s |
+| 滚动更新 + 健康检查 | ~30s | maxSurge 1 + readinessProbe 逐个替换 |
+
+合计 ~4min（FluxCD 轮询按均值计）。
+
+**追问：怎么优化到 1min？为什么不做？** 手段有三个：① Flux 配置 webhook receiver 替代 1min 轮询（省 ~30s）；② buildx 用 GitHub Actions 缓存（省 ~30s）；③ Trivy 漏洞库缓存（省 ~10s）。不做的原因：个人项目发布频率极低，4min 无感，webhook 需要暴露公网 receiver 端点引入新的安全面——为不存在的需求加复杂度，和 Q18 "不为用而用"是同一个原则。
+
+---
+
+#### Q24: 【拟设备份场景】备份用时 / 恢复用时是多少？RPO 是多少？
+
+> 简历中备份只有"7 天保留、流程已验证"，没有时间量化。以下场景为**拟设**（10GB 数据规模、2C4G 硬件推算），面试前应实际跑一次校准数字。
+
+**拟设量化口径：**
+
+| 环节 | 拟设数值 | 计算依据 |
+|------|---------|---------|
+| MySQL 数据规模 | 10 GB | shortlink 库灌入压测数据后的规模（2C4G ECS 可承受） |
+| xtrabackup 全量（Slave 上，`xbstream \| gzip` 流式） | ~5 min | 瓶颈是 gzip 压缩 ~40MB/s（2C 单核）：10GB ÷ 40MB/s ≈ 4min，加 redo 合并开销 |
+| 压缩后备份包 | ~2.5 GB | 行数据文本为主，gzip 压缩比 ~4:1 |
+| ossutil 上传 OSS | ~1 min | ECS → OSS 同地域内网带宽 50MB/s+ |
+| **全量备份总用时** | **~6 min** | 02:00 开始 02:06 完成，距 Velero 02:30 有 24min 余量 |
+| **恢复总用时（RTO）** | **~25 min** | OSS 下载 2.5GB ~1min + `--prepare`（长尾，~8min）+ `--copy-back` ~4min + 启动重建 GTID 复制 ~2min；Velero 侧 restore ~5min |
+
+**回答要点：** 备份窗口是设计出来的，不是碰运气——MySQL 02:00、Velero 02:30 错峰 30min，且全量 6min 远小于窗口；RTO 的长尾在 `--prepare`（重放 redo 到一致性点位），不是数据传输。
+
+**Velero 侧 restore ~5min 的构成（要能拆开讲）：** Velero 备份的持久卷是 Redis 的 3 个 PVC（每个 512Mi，local-path；实际占用仅百 MB 级——缓存语义，数据远小于容量，kopia FSB 备份的是实际文件而非 PVC 容量）：
+
+| 阶段 | 耗时 | 说明 |
+|------|------|------|
+| API 资源重建 | ~1min | 恢复 namespace / Secret / StatefulSet / Service / PVC 对象 |
+| kopia 数据回灌 | ~1min | node-agent 从 OSS 下载 PVC 数据；数据量小，耗时是 kopia 解压校验的固定开销 |
+| Workload 有序拉起 | ~2-3min | redis-0 → 1 → 2 串行（StatefulSet 有序性），每个 Pod 含 init container（DNS 修复）+ readiness 就绪；Sentinel StatefulSet 同理 |
+
+**追问 1：为什么用 `xbstream | gzip` 流式管道，而不是先落盘再压缩？** node-03 是 2C4G + 40GB 系统盘，数据目录已 10GB，落盘压缩需要额外 10GB 临时空间，磁盘余量扛不住。流式管道内存占用恒定、磁盘零额外占用，代价是压缩 CPU 成为瓶颈拉长用时——小磁盘机器上用时间换空间，是正确取舍。
+
+**追问 2：为什么在 Slave 上备份而不是 Master？一致性怎么保证？** 备份的读 IO 压力和 redo 拷贝都隔离在 Slave 上，不抖动 Master 写入。一致性方面：xtrabackup 本身是 crash-consistent（备份起点记录 checkpoint LSN，prepare 时重放 redo）；再加 `--slave-info` 记录备份时刻的 GTID 位点，恢复后 `SOURCE_AUTO_POSITION=1` 从该位点续传复制，不丢不重。
+
+**追问 3：每天一次全量，RPO 是多少？下午 Master 磁盘坏了丢多少数据？** 分场景：
+
+- **节点整体故障**：Orchestrator 提升 Slave，RPO ≈ 复制延迟（< 1s），与备份无关
+- **误删数据（DROP TABLE）**：秒级同步到 Slave，主从同时丢——只能回到凌晨全量，最坏丢 ~20h 数据
+- **真正的改进项**：binlog 备份（PITR）。用 `mysqlbinlog --read-from-remote-server` 实时拉 binlog 推 OSS，RPO 收敛到秒级；最低限度用 ossutil 分钟级同步 binlog 目录。目前 binlog 只在物理机本地，这是本项目"未来改进"清单第一项——面试主动讲出比被问到体面得多
+
+**追问 4：凌晨 2 点的备份 cron 挂了，你怎么知道？** 现状的诚实回答：退出码和推送结果写进巡检报告，周报才能发现，滞后最多一周。正确做法是备份完成后立即校验产物：① OSS 对象存在且大小 > 历史最小值的 70%（防 gzip 出空包/半包）；② 定期恢复演练——**可恢复的备份才算备份**，校验"备份存在"只是及格线。企业里这是备份成功率 SLA + 告警。
+
+**追问 5：如果数据涨到备份超过 30min 窗口，和 Velero 重叠了怎么办？** 三个手段按序上：① Velero 窗口顺延（两套备份互不依赖，重叠只影响 OSS 带宽峰值，不会互相破坏）；② MySQL 改全量+增量（周全量 + `xtrabackup --incremental` 日增量，日备份降到分钟级）；③ 备份与上传流水线化（`xbstream | gzip | ossutil` 三段管道边备边传）。关键是先讲清"重叠不致命"，再讲优化顺序。
 
 ---
