@@ -171,7 +171,9 @@ git push (app/ 或 Dockerfile 变更)
 │       ├── 02-deploy-mysql.yml  # 数据层部署
 │       ├── 03-configure-acr.yml # ACR 配置
 │       ├── 04-setup-backup-tools.yml  # 备份工具安装
-│       ├── 05-restore-mysql.yml      # MySQL 恢复
+│       ├── 05-restore-mysql-drill.yml # MySQL 恢复演练
+│       ├── 05-restore-mysql-dr.yml   # MySQL 灾难恢复（灾难已发生）
+│       ├── 06-restore-redis.yml      # Redis Velero 恢复
 │       └── 08-db-inspect.yml         # 数据库自动巡检部署
 ├── terraform/                   # IaC
 ├── scripts/

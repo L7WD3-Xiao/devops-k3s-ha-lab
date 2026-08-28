@@ -1,24 +1,35 @@
 ---
-# 05-restore-mysql.yml
-# 从 OSS 中的 xtrabackup 备份恢复 MySQL
+# 05-restore-mysql-dr.yml
+# MySQL 灾难恢复 playbook — 灾难已经发生的场景
 #
-# 目标: node-03 (MySQL Slave) — 最安全的恢复目标
+# 编号说明: 与 05-restore-mysql-drill.yml 共用 05 编号，后缀区分场景:
+#   -drill  演练（集群健康，按 phase-7 §6.1 流程验证备份可用性）
+#   -dr     真实灾难响应（mysqld 宕机 / datadir 损坏 / 节点重建）
+#
+# ⚠️ 与 05-restore-mysql-drill.yml 的区别：
+#   - 假设 mysqld 可能已宕机 / datadir 可能已损坏（崩溃后无法优雅停止也照常执行）
+#   - 假设 datadir 可能不存在（节点重建后从零恢复）
+#   - 前置检查更严格：备份工具、OSS 连通性、磁盘空间（演练版假设环境健康）
+#   - 启动等待时间更长（大数据量 + InnoDB 崩溃恢复）
+#
+# 目标: node-03 (MySQL Slave) — Master (node-02) 恢复期间继续服务
 # 来源: OSS 中最新备份 (或指定 backup_name)
 #
 # 流程:
-#   1. 从 OSS 下载备份
-#   2. 停止目标节点 mysqld
-#   3. 清空 datadir (重命名旧数据, 不删除)
-#   4. xtrabackup --prepare (准备备份)
-#   5. xtrabackup --copy-back (恢复到 datadir)
-#   6. chown mysql:mysql datadir
-#   7. 启动 mysqld
-#   8. 重建复制 (GTID auto-positioning)
-#   9. 验证: SHOW REPLICA STATUS, 测试查询
+#   1. 前置检查: 备份工具 / OSS 连通性 / OSS 中有备份
+#   2. 下载 + 解压 + prepare 备份
+#   3. 停止 mysqld（容错: 已宕机则跳过）+ 备份旧 datadir（重命名，不删除）
+#   4. 磁盘空间校验 + xtrabackup --copy-back + chown
+#   5. 启动 mysqld + 验证数据
+#   6. 重建复制 (GTID auto-positioning)
+#   7. 汇总
+#
+# 前提: node-03 已执行过 04-setup-backup-tools.yml（xtrabackup + ossutil 已安装）。
+#       如果节点是全新重建的，先跑 04-setup-backup-tools.yml。
 #
 # 用法:
-#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql.yml
-#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql.yml \
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-dr.yml
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-dr.yml \
 #     -e backup_name=mysql-full-20260725-020000
 
 # ──────────────────────────────────────────────────────────────
@@ -57,15 +68,57 @@
 
 
 # ──────────────────────────────────────────────────────────────
-# Play 2: List available backups
+# Play 2: DR preflight — tools, OSS connectivity, backups exist
 # ──────────────────────────────────────────────────────────────
-- name: List available backups in OSS
+- name: DR preflight checks
   hosts: node-03
   become: true
   gather_facts: false
 
   tasks:
-    - name: List OSS backups
+    - name: Check xtrabackup is installed
+      command: which xtrabackup
+      register: xtrabackup_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if xtrabackup missing (node rebuilt?)
+      fail:
+        msg: >
+          xtrabackup not found on node-03. If this node was rebuilt from
+          scratch, run 04-setup-backup-tools.yml first, then retry.
+      when: xtrabackup_check.rc != 0
+
+    - name: Check ossutil is installed
+      command: which ossutil
+      register: ossutil_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if ossutil missing (node rebuilt?)
+      fail:
+        msg: >
+          ossutil not found on node-03. If this node was rebuilt from
+          scratch, run 04-setup-backup-tools.yml first, then retry.
+      when: ossutil_check.rc != 0
+
+    - name: Test OSS connectivity
+      command: >
+        /usr/local/bin/ossutil ls oss://{{ oss_bucket }}/
+        -e {{ oss_endpoint }}
+      register: oss_test
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if OSS unreachable
+      fail:
+        msg: >
+          Cannot reach oss://{{ oss_bucket }}/ — backups are unreadable.
+          Check credentials (/root/.ossutilconfig) and VPC endpoint
+          {{ oss_endpoint }}.
+      when: oss_test.rc != 0
+
+    - name: List available backups
       command: >
         /usr/local/bin/ossutil ls
         oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/
@@ -79,7 +132,10 @@
 
     - name: Fail if no backups found
       fail:
-        msg: "No backups found in oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/. Run xtrabackup-backup.sh first."
+        msg: >
+          No backups in oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/ —
+          nothing to restore from. Run xtrabackup-backup.sh (or restore from
+          another source).
       when: oss_ls.stdout_lines | length == 0
 
 
@@ -100,6 +156,18 @@
       loop:
         - /tmp/mysql-restore
         - /tmp/mysql-restore/backup
+
+    - name: Check /tmp free space (need > 2x backup size)
+      shell: >
+        df -m --output=avail /tmp | tail -1
+      register: tmp_free_mb
+      changed_when: false
+
+    - name: Show /tmp free space
+      debug:
+        msg: "/tmp free space: {{ tmp_free_mb.stdout | trim }} MB"
+      failed_when: tmp_free_mb.stdout | trim | int < 2048
+      # 771M 备份 ×2（压缩包 + 解压）≈ 1.6G，留余量按 2G 检查
 
     - name: Clean backup directory before extraction
       file:
@@ -168,12 +236,6 @@
       retries: 2
       delay: 5
 
-    - name: Show xtrabackup prepare output (last 5 lines)
-      debug:
-        msg:
-          - "stdout last 5: {{ prepare_result.stdout_lines[-5:] | default(['(empty)']) }}"
-          - "stderr last 5: {{ prepare_result.stderr_lines[-5:] | default(['(empty)']) }}"
-
     - name: Verify prepare completed OK
       assert:
         that:
@@ -186,7 +248,7 @@
 
 
 # ──────────────────────────────────────────────────────────────
-# Play 4: Stop MySQL and backup old datadir
+# Play 4: Stop MySQL (tolerant) and quarantine old datadir
 # ──────────────────────────────────────────────────────────────
 - name: Stop MySQL and backup old datadir
   hosts: node-03
@@ -195,17 +257,26 @@
   serial: 1
 
   tasks:
-    - name: Stop mysqld
+    - name: Check if mysqld is running
+      command: systemctl is-active mysqld
+      register: mysqld_state
+      changed_when: false
+      failed_when: false
+
+    - name: Stop mysqld (tolerate already-dead service)
       systemd:
         name: mysqld
         state: stopped
       register: mysql_stop
+      failed_when: false
+      when: mysqld_state.stdout | trim == 'active'
 
     - name: Wait for MySQL port to close
       wait_for:
         port: 3306
         state: stopped
         timeout: 30
+      when: mysqld_state.stdout | trim == 'active'
 
     - name: Backup old datadir (rename, don't delete)
       command: >
@@ -224,7 +295,10 @@
 
     - name: Note rollback path
       debug:
-        msg: "Old data backed up to: {{ datadir_backup.stdout | default('/var/lib/mysql.pre-restore.*') }}. To rollback: systemctl stop mysqld; rm -rf /var/lib/mysql; mv <backup_dir> /var/lib/mysql; systemctl start mysqld"
+        msg: >
+          Old data (if any) moved to: {{ datadir_backup.stdout | default('/var/lib/mysql.pre-restore.*') }}.
+          To rollback: systemctl stop mysqld; rm -rf /var/lib/mysql;
+          mv <backup_dir> /var/lib/mysql; systemctl start mysqld
 
 
 # ──────────────────────────────────────────────────────────────
@@ -236,6 +310,24 @@
   gather_facts: false
 
   tasks:
+    - name: Check /var free space vs prepared backup size
+      shell: |
+        backup_mb=$(du -sm /tmp/mysql-restore/backup/ | awk '{print $1}')
+        free_mb=$(df -m --output=avail /var/lib | tail -1)
+        echo "backup=${backup_mb}MB free=${free_mb}MB"
+      register: space_check
+      changed_when: false
+
+    - name: Fail if /var space is insufficient
+      fail:
+        msg: >
+          Not enough space on /var/lib: {{ space_check.stdout | trim }}.
+          Need free > backup size ×1.5 for copy-back. Clean up old
+          /var/lib/mysql.pre-restore.* or /tmp/mysql-restore/ first.
+      when: >
+        (space_check.stdout | regex_search('free=(\d+)MB', '\1') | first | int)
+        <= (space_check.stdout | regex_search('backup=(\d+)MB', '\1') | first | int) * 1.5
+
     - name: Run xtrabackup --copy-back
       command: xtrabackup --copy-back --target-dir=/tmp/mysql-restore/backup/ --datadir=/var/lib/mysql
       register: copy_back
@@ -272,11 +364,11 @@
         state: started
         enabled: true
 
-    - name: Wait for MySQL to be ready
+    - name: Wait for MySQL to be ready (long timeout — InnoDB recovery)
       wait_for:
         port: 3306
         state: started
-        timeout: 60
+        timeout: 180
 
     - name: Verify MySQL root login
       command: >
@@ -401,7 +493,7 @@
 # ──────────────────────────────────────────────────────────────
 # Play 8: Summary
 # ──────────────────────────────────────────────────────────────
-- name: Display restore summary
+- name: Display DR restore summary
   hosts: node-03
   become: true
   gather_facts: false
@@ -411,7 +503,7 @@
       debug:
         msg:
           - "═══════════════════════════════════════════════════════"
-          - " MySQL restore completed on node-03"
+          - " MySQL DR restore completed on node-03"
           - "═══════════════════════════════════════════════════════"
           - ""
           - " Restored from:     {{ backup_object | default('(see above)') }}"
@@ -419,16 +511,13 @@
           - " Shortlink URLs:    {{ mysql_urls.stdout_lines | select('search', 'total_urls') | first | default('(verify)') }}"
           - " Replication:       {{ 'OK' if thread_status.stdout is defined and 'Replica_IO_Running: Yes' in thread_status.stdout and 'Replica_SQL_Running: Yes' in thread_status.stdout else 'CHECK' }}"
           - ""
-          - " Old datadir:       /var/lib/mysql.pre-restore.*"
-          - " Temp files:        /tmp/mysql-restore/"
+          - " Old datadir:       /var/lib/mysql.pre-restore.* (keep until verified)"
+          - " Temp files:        /tmp/mysql-restore/ (clean after verification)"
           - ""
-          - " Verify manually:"
-          - "   mysql -u root -p'{{ mysql_root_password }}' -e \"SHOW REPLICA STATUS\\G\" 2>/dev/null"
-          - "   mysql -u root -p'{{ mysql_root_password }}' -e \"SELECT COUNT(*) FROM shortlink.urls;\" 2>/dev/null"
-          - "   curl http://<集群公网入口IP>/health"
-          - ""
-          - " To clean up:"
-          - "   rm -rf /tmp/mysql-restore/"
-          - "   rm -rf /var/lib/mysql.pre-restore.*"
+          - " Next steps:"
+          - "   1. Verify app: curl http://<集群公网入口IP>/health"
+          - "   2. Watch replication catch up: SHOW REPLICA STATUS\\G"
+          - "   3. If Master (node-02) was also lost, promote node-03:"
+          - "      ProxySQL backend reconfiguration required"
           - ""
           - "═══════════════════════════════════════════════════════"

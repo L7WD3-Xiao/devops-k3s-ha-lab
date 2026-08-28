@@ -1,0 +1,472 @@
+---
+# 06-restore-redis.yml
+# Velero 恢复 Redis 数据（docs/phase-7-backup-dr.md §6.2 Step 4 起）
+#
+# 前提: 灾难已发生（Redis STS/PVC 可能已删除或数据损坏），本 playbook 负责:
+#   1. 前置检查: Velero 备份可用、Redis 备份注解、Sentinel 已暂停
+#   2. 创建 Restore 并冻结 Redis STS（replicas=0）
+#      —— Redis 启动时会连接空 master 做 full resync，FLUSH 后加载空数据，
+#         会覆盖恢复的 AOF，所以数据卷拷贝完成前绝不能让 Pod 起来
+#   3. 等待 PodVolumeRestore（卷数据拷回 PV）完成
+#   4. 验证数据: 用 debug Pod 直接挂载 PVC 读 base.rdb（绕开 replication）
+#   5. 恢复服务: Redis/Sentinel 扩回副本数、恢复 FluxCD
+#
+# 变量（均可用 -e 覆盖）:
+#   velero_backup_name     指定备份名（默认取 velero ns 中最新 Completed 备份）
+#   restore_name           Restore 对象名（默认 redis-restore-<时间戳>）
+#   redis_namespace        Redis 所在 ns（默认 data-layer）
+#   redis_replicas         恢复后副本数（默认 3）
+#   redis_verify_pattern   base.rdb 验证 grep 模式（默认 'drill|redis'，演练用）
+#   redis_verify_node      debug Pod 调度节点（默认 node-01，有外网可拉 busybox）
+#   flux_system_replicas   结束时 flux-system 副本数（默认 1；设 0 跳过）
+#
+# 用法:
+#   ansible-playbook -i inventory.ini playbooks/06-restore-redis.yml
+#   ansible-playbook -i inventory.ini playbooks/06-restore-redis.yml \
+#     -e velero_backup_name=drill-backup
+#   演练验证:
+#   ansible-playbook -i inventory.ini playbooks/06-restore-redis.yml \
+#     -e velero_backup_name=drill-backup -e redis_verify_pattern='drill'
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Preflight & prechecks
+# ──────────────────────────────────────────────────────────────
+- name: Preflight and prechecks
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  vars:
+    kubectl: /usr/local/bin/k3s kubectl
+    redis_namespace: data-layer
+
+  tasks:
+    - name: Check cluster is reachable
+      command: "{{ kubectl }} get ns {{ redis_namespace }} velero"
+      changed_when: false
+
+    - name: Resolve latest Completed backup if velero_backup_name not given
+      shell: >
+        {{ kubectl }} get backups -n velero
+        -o jsonpath='{.items[?(@.status.phase=="Completed")].metadata.name}'
+        | awk '{print $NF}'
+      register: latest_backup
+      changed_when: false
+      when: velero_backup_name is not defined
+
+    - name: Set velero_backup_name fact
+      set_fact:
+        velero_backup_name_resolved: "{{ velero_backup_name | default(latest_backup.stdout) }}"
+      failed_when: velero_backup_name is not defined and latest_backup.stdout | length == 0
+
+    - name: Verify backup phase is Completed
+      command: >
+        {{ kubectl }} get backup {{ velero_backup_name_resolved }} -n velero
+        -o jsonpath='{.status.phase}'
+      register: backup_phase
+      changed_when: false
+
+    - name: Fail if backup is not Completed
+      fail:
+        msg: >
+          Backup {{ velero_backup_name_resolved }} phase is
+          '{{ backup_phase.stdout | default("(missing)") }}', not Completed.
+          Nothing to restore from — pick another backup with -e velero_backup_name=<name>.
+      when: backup_phase.stdout != 'Completed'
+
+    - name: Show backup being restored
+      debug:
+        msg: "Restoring from backup: {{ velero_backup_name_resolved }} (phase={{ backup_phase.stdout }})"
+
+    - name: Check if Redis STS still exists
+      command: "{{ kubectl }} get sts redis -n {{ redis_namespace }}"
+      register: redis_sts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check Redis backup annotation on STS
+      command: >
+        {{ kubectl }} get sts redis -n {{ redis_namespace }}
+        -o jsonpath='{.spec.template.metadata.annotations.backup\.velero\.io/backup-volumes}'
+      register: backup_annotation
+      changed_when: false
+      when: redis_sts_check.rc == 0
+
+    - name: Fail if backup annotation is missing
+      fail:
+        msg: >
+          redis STS is missing the annotation
+          backup.velero.io/backup-volumes: redis-data.
+          Without it Velero fs-backup skips the redis-data volume —
+          the restore would bring back empty volumes. Fix
+          k8s/data-layer/redis-statefulset.yaml and take a NEW backup first.
+      when:
+        - redis_sts_check.rc == 0
+        - backup_annotation.stdout != 'redis-data'
+
+    - name: Warn if STS already deleted (annotation will come from backup)
+      debug:
+        msg: >
+          redis STS not found (already destroyed). Pod annotations will be
+          restored from the backup — verify afterwards that restored STS has
+          backup.velero.io/backup-volumes=redis-data, otherwise future backups
+          capture empty volumes.
+      when: redis_sts_check.rc != 0
+
+    - name: Freeze Redis STS (scale to 0) if it still exists
+      command: "{{ kubectl }} scale sts redis -n {{ redis_namespace }} --replicas=0"
+      when: redis_sts_check.rc == 0
+      register: redis_freeze
+
+    - name: Pause Sentinel (scale to 0)
+      command: "{{ kubectl }} scale sts sentinel -n {{ redis_namespace }} --replicas=0"
+      failed_when: false
+      changed_when: false
+
+    - name: Show precheck result
+      debug:
+        msg:
+          - "Prechecks done:"
+          - "  backup:            {{ velero_backup_name_resolved }} (Completed)"
+          - "  redis STS:         {{ 'exists, annotation OK, frozen to 0' if redis_sts_check.rc == 0 else 'absent (destroyed), will be recreated by restore' }}"
+          - "  sentinel:          scaled to 0"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: Create Restore, freeze Redis, wait for volume data
+# ──────────────────────────────────────────────────────────────
+- name: Create Velero Restore and wait for volume data
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  vars:
+    kubectl: /usr/local/bin/k3s kubectl
+    redis_namespace: data-layer
+    restore_name: "{{ velero_restore_name | default('redis-restore-' + lookup('pipe', 'date +%Y%m%d-%H%M%S')) }}"
+    restore_wait_retries: 60      # 60 * 10s = 10min
+    velero_stuck_retries: 6       # 6 * 5s = 30s grace before restarting velero
+
+  tasks:
+    - name: Create Restore
+      shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: velero.io/v1
+        kind: Restore
+        metadata:
+          name: {{ restore_name }}
+          namespace: velero
+        spec:
+          backupName: {{ velero_backup_name_resolved }}
+          includedNamespaces: [{{ redis_namespace }}]
+        EOF
+      changed_when: true
+
+    - name: Freeze Redis STS as soon as restore recreates it
+      # Restore recreates the STS with its backed-up replica count — pods would
+      # start mid-copy and resync from an empty master, wiping the restored AOF.
+      command: "{{ kubectl }} scale sts redis -n {{ redis_namespace }} --replicas=0"
+      register: sts_freeze
+      until: sts_freeze.rc == 0
+      retries: 12
+      delay: 5
+
+    - name: Wait for restore Phase to appear
+      command: >
+        {{ kubectl }} get restore {{ restore_name }} -n velero
+        -o jsonpath='{.status.phase}'
+      register: restore_phase_1
+      until: restore_phase_1.stdout | length > 0
+      retries: "{{ velero_stuck_retries }}"
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: Restart Velero if restore controller is stuck (Phase empty)
+      command: "{{ kubectl }} delete pod -n velero -l app=velero"
+      when: restore_phase_1.stdout | length == 0
+      changed_when: true
+
+    - name: Wait for Velero to come back after restart
+      pause:
+        seconds: 15
+      when: restore_phase_1.stdout | length == 0
+
+    - name: Wait for restore Phase to appear (after velero restart)
+      command: >
+        {{ kubectl }} get restore {{ restore_name }} -n velero
+        -o jsonpath='{.status.phase}'
+      register: restore_phase_2
+      until: restore_phase_2.stdout | length > 0
+      retries: 24
+      delay: 10
+      changed_when: false
+      when: restore_phase_1.stdout | length == 0
+
+    - name: Set final restore phase fact
+      set_fact:
+        restore_phase: "{{ restore_phase_2.stdout if restore_phase_1.stdout | length == 0 else restore_phase_1.stdout }}"
+
+    - name: Wait for restore to finish (Completed / PartiallyFailed)
+      command: >
+        {{ kubectl }} get restore {{ restore_name }} -n velero
+        -o jsonpath='{.status.phase}'
+      register: restore_final
+      until: restore_final.stdout in ['Completed', 'PartiallyFailed', 'Failed']
+      retries: "{{ restore_wait_retries }}"
+      delay: 10
+      changed_when: false
+
+    - name: Fail if restore Failed outright
+      fail:
+        msg: >
+          Restore {{ restore_name }} ended in phase Failed.
+          Inspect: {{ kubectl }} describe restore {{ restore_name }} -n velero
+      when: restore_final.stdout == 'Failed'
+
+    - name: Warn if restore PartiallyFailed
+      debug:
+        msg: >
+          Restore ended PartiallyFailed. Common cause: node-02/03 lack Internet
+          for image pull — objects restored, verify volume data before proceeding.
+      when: restore_final.stdout == 'PartiallyFailed'
+
+    - name: Wait for at least one PodVolumeRestore Completed
+      command: >
+        {{ kubectl }} get podvolumerestore -n velero
+        -l velero.io/restore-name={{ restore_name }}
+        -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}'
+      register: pvr_status
+      until: "'Completed' in pvr_status.stdout"
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Show PodVolumeRestore status
+      debug:
+        var: pvr_status.stdout_lines
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Verify restored data (bypass Redis replication)
+# ──────────────────────────────────────────────────────────────
+- name: Verify restored data with a debug pod
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  vars:
+    kubectl: /usr/local/bin/k3s kubectl
+    redis_namespace: data-layer
+    redis_verify_pattern: "drill|redis"
+    redis_verify_node: node-01
+    redis_verify_image: busybox
+
+  tasks:
+    - name: Get first restored PVC name
+      command: >
+        {{ kubectl }} get pvc -n {{ redis_namespace }} -l app=redis
+        -o jsonpath='{.items[0].metadata.name}'
+      register: pvc_name
+      changed_when: false
+      failed_when: pvc_name.stdout | length == 0
+
+    - name: Show PVC being verified
+      debug:
+        msg: "Verifying data on PVC: {{ pvc_name.stdout }}"
+
+    - name: Clean up leftover verify pod
+      command: "{{ kubectl }} delete pod pvc-verify -n {{ redis_namespace }} --force --grace-period=0"
+      failed_when: false
+      changed_when: false
+
+    - name: Create pvc-verify debug pod (mount restored PVC, no Redis)
+      shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: pvc-verify
+          namespace: {{ redis_namespace }}
+        spec:
+          nodeName: {{ redis_verify_node }}
+          containers:
+          - name: check
+            image: {{ redis_verify_image }}
+            command: ['sleep', '300']
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities: {drop: [ALL]}
+              runAsNonRoot: true
+              runAsUser: 1000
+              seccompProfile: {type: RuntimeDefault}
+            volumeMounts:
+            - name: data
+              mountPath: /mnt
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: {{ pvc_name.stdout }}
+          restartPolicy: Never
+        EOF
+      changed_when: true
+
+    - name: Wait for pvc-verify pod to be ready
+      command: >
+        {{ kubectl }} wait --for=condition=Ready pod/pvc-verify
+        -n {{ redis_namespace }} --timeout=120s
+      register: verify_pod_ready
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if debug pod did not come up
+      fail:
+        msg: >
+          pvc-verify pod not Ready. Check image pull ({{ redis_verify_image }})
+          and node {{ redis_verify_node }}: {{ kubectl }} describe pod pvc-verify -n {{ redis_namespace }}
+      when: verify_pod_ready.rc != 0
+
+    - name: Read keys from restored AOF base RDB
+      shell: >
+        {{ kubectl }} exec -n {{ redis_namespace }} pvc-verify -- sh -c
+        "strings /mnt/appendonlydir/appendonly.aof.*.base.rdb | grep -E '{{ redis_verify_pattern }}'"
+      register: data_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show matched keys
+      debug:
+        var: data_check.stdout_lines
+
+    - name: Fail if no data found in base RDB
+      fail:
+        msg: >
+          No lines matching '{{ redis_verify_pattern }}' in the restored
+          base.rdb — the volume may be empty (backup captured before
+          BGREWRITEAOF, or wrong backup). Inspect manually:
+          {{ kubectl }} exec -n {{ redis_namespace }} pvc-verify --
+          ls -la /mnt/appendonlydir/
+      when: data_check.stdout | length == 0
+
+    - name: Delete pvc-verify pod
+      command: "{{ kubectl }} delete pod pvc-verify -n {{ redis_namespace }} --force --grace-period=0"
+      changed_when: true
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 4: Restore service (scale up Redis / Sentinel / FluxCD)
+# ──────────────────────────────────────────────────────────────
+- name: Restore service
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  vars:
+    kubectl: /usr/local/bin/k3s kubectl
+    redis_namespace: data-layer
+    redis_replicas: 3
+
+  tasks:
+    - name: Scale Redis STS back up
+      command: "{{ kubectl }} scale sts redis -n {{ redis_namespace }} --replicas={{ redis_replicas }}"
+      changed_when: true
+
+    - name: Scale Sentinel STS back up
+      command: "{{ kubectl }} scale sts sentinel -n {{ redis_namespace }} --replicas={{ redis_replicas }}"
+      changed_when: true
+
+    - name: Give pods a moment to schedule
+      pause:
+        seconds: 10
+
+    - name: Delete stuck (non-Running) Redis pods
+      # node-02/03 have no Internet — pods may hit Init:ImagePullBackOff even
+      # though kubelet has the image cached; recreating the pod reuses cache.
+      command: >
+        {{ kubectl }} delete pod -n {{ redis_namespace }} -l app=redis
+        --field-selector=status.phase!=Running
+      register: stuck_pods
+      failed_when: false
+      changed_when: false
+
+    - name: Show stuck pods deleted
+      debug:
+        var: stuck_pods.stdout_lines
+      when: stuck_pods.stdout | default('') | length > 0
+
+    - name: Wait for all Redis pods to be Ready
+      command: >
+        {{ kubectl }} wait --for=condition=Ready pod -l app=redis
+        -n {{ redis_namespace }} --timeout=300s
+      register: redis_ready
+      changed_when: false
+
+    - name: Show Redis pods
+      command: "{{ kubectl }} get pods -n {{ redis_namespace }} -l app=redis -o wide"
+      register: redis_pods
+      changed_when: false
+
+    - name: Show Sentinel pods
+      command: "{{ kubectl }} get pods -n {{ redis_namespace }} -l app=sentinel -o wide"
+      register: sentinel_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Show pod status
+      debug:
+        msg:
+          - "{{ redis_pods.stdout_lines }}"
+          - "{{ sentinel_pods.stdout_lines | default(['(sentinel pods not shown)']) }}"
+
+    - name: Restore FluxCD replicas
+      command: "{{ kubectl }} scale deploy -n flux-system --replicas={{ flux_system_replicas }} --all"
+      changed_when: true
+      when: flux_system_replicas is defined and flux_system_replicas | int > 0
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 5: Summary
+# ──────────────────────────────────────────────────────────────
+- name: Display restore summary
+  hosts: node-01
+  become: true
+  gather_facts: false
+
+  vars:
+    kubectl: /usr/local/bin/k3s kubectl
+    redis_namespace: data-layer
+
+  tasks:
+    - name: Get Redis replication info from redis-0
+      command: >
+        {{ kubectl }} exec -n {{ redis_namespace }} redis-0 --
+        redis-cli info replication
+      register: repl_info
+      changed_when: false
+      failed_when: false
+
+    - name: Show replication role lines
+      debug:
+        msg: "{{ repl_info.stdout_lines | default(['(redis-0 not queryable)']) | select('match', '^(role|connected_slaves|master_failover_state)') | list }}"
+
+    - name: Show completion message
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " Redis restore completed"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " Backup:            {{ velero_backup_name_resolved | default('(see Play 1 output)') }}"
+          - " Restore:           {{ restore_name | default('(see Play 2 output)') }}"
+          - " Redis pods:        {{ redis_pods.stdout_lines | default([]) | select('search', 'Running') | list | length }}/{{ redis_pods.stdout_lines | default([]) | select('search', 'redis-') | list | length }} Running"
+          - ""
+          - " Verify manually:"
+          - "   ssh k3s-node-01 'sudo /usr/local/bin/k3s kubectl exec -n data-layer redis-0 -- redis-cli info replication'"
+          - "   ssh k3s-node-01 'sudo /usr/local/bin/k3s kubectl exec -n data-layer redis-0 -- redis-cli ping'"
+          - "   curl http://<集群公网入口IP>/health"
+          - ""
+          - " Cleanup (drill only — keep objects after a real DR):"
+          - "   kubectl delete backup {{ velero_backup_name_resolved | default('drill-backup') }} -n velero"
+          - "   kubectl delete restore {{ restore_name | default('redis-restore-*') }} -n velero"
+          - ""
+          - "═══════════════════════════════════════════════════════"

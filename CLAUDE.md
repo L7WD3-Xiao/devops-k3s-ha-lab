@@ -56,6 +56,11 @@ ansible/playbooks/
   01-deploy-k3s.yml                    # K3s cluster deployment
   02-deploy-mysql.yml                  # MySQL/Redis data layer
   03-configure-acr.yml                # ACR registry config
+  04-setup-backup-tools.yml            # xtrabackup/ossutil install + cron
+  05-restore-mysql-drill.yml           # MySQL restore drill (healthy cluster)
+  05-restore-mysql-dr.yml              # MySQL DR restore (disaster already happened)
+  06-restore-redis.yml                 # Redis Velero restore (prechecks → freeze → verify)
+  08-db-inspect.yml                    # DB inspection script + cron deploy
 docs/                                  # Phase docs + 踩坑 records
 terraform/                             # (reserved for future IaC)
 ```

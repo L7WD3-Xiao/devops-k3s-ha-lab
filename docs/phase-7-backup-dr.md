@@ -891,12 +891,16 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 
 #### 4.2 新建文件
 
-`ansible/playbooks/05-restore-mysql.yml`
+`ansible/playbooks/05-restore-mysql-drill.yml`（原 `05-restore-mysql.yml`，2026-08 重命名以区分演练/真实灾难两个场景）
 
 ```yaml
 ---
-# 05-restore-mysql.yml
-# 从 OSS 中的 xtrabackup 备份恢复 MySQL
+# 05-restore-mysql-drill.yml
+# MySQL 恢复演练 playbook（docs/phase-7-backup-dr.md §6.1）
+#
+# ⚠️ 本 playbook 面向"集群健康、按文档流程做演练"的场景。
+#    灾难已经发生（mysqld 宕机 / datadir 损坏 / 节点重建）时，
+#    请使用 05-restore-mysql-dr.yml。
 #
 # 目标: node-03 (MySQL Slave) — 最安全的恢复目标
 # 来源: OSS 中最新备份 (或指定 backup_name)
@@ -913,8 +917,8 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 #   9. 验证: SHOW REPLICA STATUS, 测试查询
 #
 # 用法:
-#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql.yml
-#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql.yml \
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-drill.yml
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-drill.yml \
 #     -e backup_name=mysql-full-20260725-020000
 ```
 
@@ -935,6 +939,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 - 验证：`assert` 模块同时检查 stdout **和 stderr**（xtrabackup 的输出在 stderr）
 
 **Play 4：停 MySQL + 清空 datadir** (hosts: node-03, become: true, serial: 1)
+
 - 停止：`systemctl stop mysqld`
 - 等待 3306 端口关闭
 - **重命名**（不删除）旧数据：`mv /var/lib/mysql /var/lib/mysql.pre-restore.$(date +%s)`
@@ -991,6 +996,30 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 7. **`--datadir` 参数必须显式传入**：`xtrabackup --copy-back` 读取 my.cnf 确定 datadir。如果 `/etc/my.cnf` 未显式写 `datadir`，报 `datadir must be specified`。虽然 MySQL 默认是 `/var/lib/mysql`，xtrabackup 不会用默认值，必须传 `--datadir=/var/lib/mysql`
 8. **Ansible `command` 模块不支持 Shell 重定向**：`mysql ... 2>/dev/null` 中的 `2>/dev/null` 被当作数据库名参数传给 mysql（`Unknown database '2>/dev/null'`）。应去掉 Shell 重定向，改用 `failed_when: false` 处理连接失败
 9. **`gather_facts: true` 才能在 `command` 参数中用 `ansible_date_time`**：`ansible_date_time` 是 Ansible facts 变量，`gather_facts: false` 时不可用（`'ansible_date_time' is undefined`）。生成时间戳的场景须开启 fact 收集或用 `lookup('pipe', 'date +%s')`
+
+#### 4.5 灾难恢复 Playbook（灾难已发生场景）
+
+`ansible/playbooks/05-restore-mysql-dr.yml`（2026-08 新增，与 05-restore-mysql-drill.yml 共用 05 编号，后缀区分场景）
+
+`-drill` 是演练版本 — 它假设集群健康、按 §6.1 流程走。真实灾难发生时（mysqld 宕机、datadir 损坏、节点重建），使用 `-dr`，两者差异：
+
+| 差异点 | 05-drill（演练） | 05-dr（DR） |
+|-------|-----------|---------|
+| mysqld 状态 | 假设健康，`systemctl stop` | 容错：先 `systemctl is-active` 探测，已宕机则跳过停止/等端口 |
+| datadir 状态 | 假设存在 | 容错：`removes` 守卫，不存在（节点重建）也能走完 |
+| 备份工具 | 假设已安装（依赖 Step 2） | 前置检查 xtrabackup/ossutil，缺失则提示先跑 `04-setup-backup-tools.yml` |
+| OSS 连通性 | 仅列目录 | 独立连通性测试 + 明确报错（凭证/endpoint） |
+| 磁盘空间 | 不检查 | `/tmp` 需 >2G（下载+解压）、copy-back 前 /var 剩余空间 > 备份 ×1.5 |
+| mysqld 启动等待 | 60s | 180s（大数据量 + InnoDB 崩溃恢复） |
+| 汇总提示 | 常规验证 | 额外提示 Master 也丢失时的 ProxySQL 切换路径 |
+
+用法与 05 相同：
+
+```bash
+ansible-playbook -i inventory.ini playbooks/05-restore-mysql-dr.yml
+ansible-playbook -i inventory.ini playbooks/05-restore-mysql-dr.yml \
+  -e backup_name=mysql-full-20260725-020000
+```
 
 ---
 
@@ -1058,12 +1087,12 @@ kubectl exec -n data-layer redis-0 -- redis-cli GET drill:test
 
 #### 6.1 MySQL 恢复演练
 
-执行
+执行（演练用 05-drill；灾难已发生时用 05-dr，见 §4.5）
 
 ```bash
 ssh k3s-node-01
 cd /home/ops/ansible
-ansible-playbook -i inventory.ini playbooks/05-restore-mysql.yml
+ansible-playbook -i inventory.ini playbooks/05-restore-mysql-drill.yml
 ```
 
 预期结果：
@@ -1088,7 +1117,13 @@ systemctl start mysqld
 
 #### 6.2 K8s 恢复演练
 
-集群操作，通过 node-01 SSH 执行（`kubectl` 不在本地安装）。
+集群操作，通过 node-01 SSH 执行。
+
+> 本节 Step 4 起的恢复流程已自动化为
+> `ansible/playbooks/06-restore-redis-dr.yml`（前置检查 → Restore → 冻结 Redis →
+> 等 PodVolumeRestore → 挂载 PVC 验证 → 恢复服务），可直接
+> `ansible-playbook -i inventory.ini playbooks/06-restore-redis-dr.yml -e velero_backup_name=drill-backup`。
+> 以下手动步骤保留作为原理说明与 playbook 故障时的兜底。
 
 **⚠️ 前置条件**：
 
@@ -1106,7 +1141,8 @@ kubectl scale deploy -n flux-system --replicas=0 --all
      backup.velero.io/backup-volumes: redis-data
    ```
 
-3. **Sentinel 已暂停**（可选，恢复时避免 replication 覆盖）：
+3. **Sentinel 已暂停**（恢复时避免 replication 覆盖）：
+   
    ```bash
    kubectl scale sts sentinel -n data-layer --replicas=0
    ```
@@ -1175,7 +1211,7 @@ kubectl delete pod -n velero -l app=velero
 
 sleep 15
 
-# ⚠️ 关键：立即缩 Redis STS 到 0，阻止 Pod 启动
+# ⚠️ 关键：立即缩 Redis STS 到 0，阻止 Pod 启动（如果前置条件里这条没做，请在这里进行）
 # 原因是 Redis 启动时会尝试连接 master（replication），
 # 空 master 会覆盖恢复的 AOF 数据
 kubectl scale sts redis -n data-layer --replicas=0
@@ -1247,47 +1283,7 @@ kubectl delete backup drill-backup -n velero
 kubectl delete restore drill-restore -n velero
 ```
 
-#### 6.3 2026-07-27 实际演练结果
-
-以下记录了今天演练中发现的**所有陷阱**和最终成功的验证链路。
-
-**环境状态**：
-- node-01 2GB RAM，k3s server 756MB + FluxCD ×6 + data-layer pods → 可用 ~200MB
-- node-02/03 无公网，containerd 配置 docker.io mirror → daocloud
-
-**发现并修复的问题**：
-
-| # | 问题 | 症状 | 修复 |
-|---|------|------|------|
-| 1 | **node-agent label 不匹配** | FSB 卷备份全部失败（8 errors） | DaemonSet label 改为 `name=node-agent`（Velero v1.15 硬编码 `labels.Parse("name=node-agent")`） |
-| 2 | **node-agent 仅 node-01** | node-02/03 的 PVC 无法备份 | 移除 nodeSelector，ACR 推送镜像使所有节点可拉取 |
-| 3 | **Node-01 OOM** | Velero 进程被杀 5 次，backup Failed | FluxCD 缩到 0 释放 ~400MB |
-| 4 | **containerd docker.io mirror** | node-02/03 即使镜像已缓存仍尝试拉取 → ImagePullBackOff | 修改 registries.yaml 移除 docker.io mirror，重启 k3s |
-| 5 | **Redis AOF 持久化延迟** | 备份捕获空 AOF base RDB（88 字节），恢复后无数据 | 备份前 `BGREWRITEAOF` 所有 pod |
-| 6 | **Sentinel 旧 IP** | Redis pod 重建后 IP 变更，Sentinel 读取旧 PVC 数据 → master s_down → replication 断裂 | 恢复时 Sentinel 缩到 0，恢复后 PVC 重置 |
-| 7 | **Velero restore controller 卡死** | Restore Phase 长时间为空，无 PodVolumeRestore 创建 | 重启 Velero pod (`kubectl delete pod -l app=velero`) |
-| 8 | **Redis replication 覆盖恢复数据** | restore-wait init container 完成后 Redis 启动，slave 连接 master 被覆盖 | STS 缩到 0 阻止启动，debug pod 直接验证 PVC |
-| 9 | **restore-wait init container 镜像** | Velero v1.15 无 `--restore-helper-image` flag | 镜像推送到 ACR，ctr 拉取到所有节点，Cached image + pod delete 绕过 |
-
-**最终验证结果**：
-
-| 验证项 | 状态 | 详情 |
-|--------|------|------|
-| 备份完成 | ✅ | `final-backup` Completed, 413 items, 6 PVBs (含 3×redis-data) |
-| PVC 数据恢复 | ✅ | redis-1 PVC PodVolumeRestore 完成，`.velero` 目录 + AOF 文件到位 |
-| PVC 数据验证 | ✅ | debug pod 挂载 PVC，`strings` 检查 AOF base RDB 含 `final-demo-ok` |
-| AOF 持久化前 | ❌ | 备份捕获 88 字节空 RDB（仅 metadata，无业务数据） |
-| AOF 持久化后 | ✅ | 备份捕获 119 字节 RDB（含 `drill:test` → `final-demo-ok`） |
-| ImagePullBackOff 绕过 | ✅ | 删除 stuck pod → kubelet 重用本地缓存 → Pod Running |
-| Sentinel replication | ❌ | Sentinel 持有旧 Pod IP → `s_down` → slave 无数据 |
-
-**关键结论**：
-1. **Velero FSB 备份/恢复链路可用**：备份 → OSS → 恢复 → PVC 数据验证 全部通过
-2. **Redis AOF 持久化是必须步骤**：不执行则恢复数据为空
-3. **Sentinel 状态管理是独立问题**：与 Velero 备份恢复正交，需单独处理
-4. **node-01 内存是长期瓶颈**：2GB 不足以稳定运行备份工作负载
-
-#### 6.4 预期结果
+#### 6.3 预期结果
 
 | 演练 | 指标 | 预期 | 通过标准 |
 |------|------|------|---------|
@@ -1317,7 +1313,9 @@ kubectl delete restore drill-restore -n velero
 |---------|------|------|
 | `ansible/playbooks/04-setup-backup-tools.yml` | Step 2 | xtrabackup + ossutil 安装 + cron 部署 |
 | `ansible/playbooks/templates/ossutil-config.j2` | Step 2 | ossutil 配置模板 |
-| `ansible/playbooks/05-restore-mysql.yml` | Step 4 | MySQL xtrabackup 恢复 playbook |
+| `ansible/playbooks/05-restore-mysql-drill.yml` | Step 4 | MySQL xtrabackup 恢复演练 playbook（原 05-restore-mysql.yml） |
+| `ansible/playbooks/06-restore-redis-dr.yml` | Step 6.2 | Redis Velero 恢复 playbook（前置检查→Restore→冻结→验证→恢复服务） |
+| `ansible/playbooks/05-restore-mysql-dr.yml` | Step 4.5 | MySQL 灾难恢复 playbook（灾难已发生场景，容错增强） |
 | `scripts/xtrabackup-backup.sh` | Step 2 | MySQL 备份脚本（流式 + 推送 OSS） |
 | `k8s/velero/namespace.yaml` | Step 3 | Velero namespace + ResourceQuota |
 | `k8s/velero/rbac.yaml` | Step 3 | ServiceAccount + ClusterRoleBinding |

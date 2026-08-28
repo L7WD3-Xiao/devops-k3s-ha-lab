@@ -1,0 +1,441 @@
+---
+# 05-restore-mysql-drill.yml
+# MySQL 恢复演练 playbook（docs/phase-7-backup-dr.md §6.1）
+#
+# 编号说明: 与 05-restore-mysql-dr.yml 共用 05 编号，后缀区分场景:
+#   -drill  演练（集群健康，按文档流程验证备份可用性）
+#   -dr     真实灾难响应（mysqld 宕机 / datadir 损坏 / 节点重建）
+#
+# ⚠️ 本 playbook 面向"集群健康、按文档流程做演练"的场景。
+#    灾难已经发生时，请使用 05-restore-mysql-dr.yml。
+#
+# 目标: node-03 (MySQL Slave) — 最安全的恢复目标
+# 来源: OSS 中最新备份 (或指定 backup_name)
+#
+# 流程:
+#   1. 从 OSS 下载备份
+#   2. 停止目标节点 mysqld
+#   3. 清空 datadir (重命名旧数据, 不删除)
+#   4. xtrabackup --prepare (准备备份)
+#   5. xtrabackup --copy-back (恢复到 datadir)
+#   6. chown mysql:mysql datadir
+#   7. 启动 mysqld
+#   8. 重建复制 (GTID auto-positioning)
+#   9. 验证: SHOW REPLICA STATUS, 测试查询
+#
+# 用法:
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-drill.yml
+#   ansible-playbook -i inventory.ini playbooks/05-restore-mysql-drill.yml \
+#     -e backup_name=mysql-full-20260725-020000
+
+# ──────────────────────────────────────────────────────────────
+# Play 1: Validate prerequisites
+# ──────────────────────────────────────────────────────────────
+- name: Validate prerequisites
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Check mysql_root_password is set
+      assert:
+        that:
+          - mysql_root_password is defined
+          - mysql_root_password | length > 0
+          - mysql_root_password != 'CHANGE_ME'
+        fail_msg: "mysql_root_password not set. Configure in group_vars/all.yml."
+        success_msg: "mysql_root_password is set"
+
+    - name: Check OSS variables are set
+      assert:
+        that:
+          - oss_access_key_id is defined
+          - oss_access_key_id != 'CHANGE_ME'
+          - oss_access_key_secret is defined
+          - oss_access_key_secret != 'CHANGE_ME'
+          - oss_bucket is defined
+          - oss_endpoint is defined
+        fail_msg: "OSS variables not set. Configure in group_vars/all.yml."
+        success_msg: "OSS configuration verified"
+
+    - name: Show backup name to use
+      debug:
+        msg: "Using backup: {{ backup_name | default('(latest available)') }}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 2: List available backups
+# ──────────────────────────────────────────────────────────────
+- name: List available backups in OSS
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: List OSS backups
+      command: >
+        /usr/local/bin/ossutil ls
+        oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/
+        -e {{ oss_endpoint }}
+      register: oss_ls
+      changed_when: false
+
+    - name: Show available backups
+      debug:
+        var: oss_ls.stdout_lines
+
+    - name: Fail if no backups found
+      fail:
+        msg: "No backups found in oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/. Run xtrabackup-backup.sh first."
+      when: oss_ls.stdout_lines | length == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 3: Download and prepare backup
+# ──────────────────────────────────────────────────────────────
+- name: Download and prepare xtrabackup
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create restore temp directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /tmp/mysql-restore
+        - /tmp/mysql-restore/backup
+
+    - name: Clean backup directory before extraction
+      file:
+        path: /tmp/mysql-restore/backup/
+        state: absent
+      changed_when: false
+
+    - name: Recreate clean backup directory
+      file:
+        path: /tmp/mysql-restore/backup
+        state: directory
+        mode: '0755'
+
+    - name: Find latest backup if backup_name not specified
+      shell: >
+        /usr/local/bin/ossutil ls
+        oss://{{ oss_bucket }}/{{ oss_mysql_backup_prefix }}/
+        -e {{ oss_endpoint }}
+        | grep '.xbstream.gz'
+        | sort
+        | tail -1
+        | awk '{print $NF}'
+      register: latest_backup
+      changed_when: false
+      when: backup_name is not defined
+
+    - name: Set backup_object variable
+      set_fact:
+        backup_object: "{{ 'oss://' + oss_bucket + '/' + oss_mysql_backup_prefix + '/' + backup_name + '.xbstream.gz' if backup_name is defined else latest_backup.stdout }}"
+
+    - name: Show backup being restored
+      debug:
+        msg: "Restoring from: {{ backup_object }}"
+
+    - name: Download backup from OSS
+      command: >
+        /usr/local/bin/ossutil cp "{{ backup_object }}" /tmp/mysql-restore/backup.xbstream.gz
+        -f -e {{ oss_endpoint }}
+      register: oss_download
+      until: oss_download is success
+      retries: 3
+      delay: 5
+
+    - name: Verify download
+      stat:
+        path: /tmp/mysql-restore/backup.xbstream.gz
+      register: dl_file
+      failed_when: not dl_file.stat.exists or dl_file.stat.size == 0
+
+    - name: Show downloaded file size
+      debug:
+        msg: "Downloaded: {{ dl_file.stat.size | filesizeformat }}"
+
+    - name: Decompress and extract xbstream
+      shell:
+        cmd: |
+          set -o pipefail
+          gunzip -c /tmp/mysql-restore/backup.xbstream.gz \
+            | xbstream -x -C /tmp/mysql-restore/backup/
+      register: extract_result
+
+    - name: Prepare backup with xtrabackup
+      command: xtrabackup --prepare --target-dir=/tmp/mysql-restore/backup/
+      register: prepare_result
+      until: prepare_result is success
+      retries: 2
+      delay: 5
+
+    - name: Show xtrabackup prepare output (last 5 lines)
+      debug:
+        msg:
+          - "stdout last 5: {{ prepare_result.stdout_lines[-5:] | default(['(empty)']) }}"
+          - "stderr last 5: {{ prepare_result.stderr_lines[-5:] | default(['(empty)']) }}"
+
+    - name: Verify prepare completed OK
+      assert:
+        that:
+          - "'completed OK!' in prepare_result.stdout or 'completed OK!' in prepare_result.stderr"
+        fail_msg: >
+          xtrabackup --prepare did not complete successfully.
+          stdout last 5 lines: {{ prepare_result.stdout_lines[-5:] | default(['(empty)']) | join('; ') }}
+          stderr last 5 lines: {{ prepare_result.stderr_lines[-5:] | default(['(empty)']) | join('; ') }}
+        success_msg: "xtrabackup --prepare completed OK"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 4: Stop MySQL and backup old datadir
+# ──────────────────────────────────────────────────────────────
+- name: Stop MySQL and backup old datadir
+  hosts: node-03
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Stop mysqld
+      systemd:
+        name: mysqld
+        state: stopped
+      register: mysql_stop
+
+    - name: Wait for MySQL port to close
+      wait_for:
+        port: 3306
+        state: stopped
+        timeout: 30
+
+    - name: Backup old datadir (rename, don't delete)
+      command: >
+        mv /var/lib/mysql /var/lib/mysql.pre-restore.{{ ansible_date_time.epoch }}
+      args:
+        removes: /var/lib/mysql
+      register: datadir_backup
+
+    - name: Create fresh datadir
+      file:
+        path: /var/lib/mysql
+        state: directory
+        mode: '0755'
+        owner: mysql
+        group: mysql
+
+    - name: Note rollback path
+      debug:
+        msg: "Old data backed up to: {{ datadir_backup.stdout | default('/var/lib/mysql.pre-restore.*') }}. To rollback: systemctl stop mysqld; rm -rf /var/lib/mysql; mv <backup_dir> /var/lib/mysql; systemctl start mysqld"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 5: Restore backup with xtrabackup --copy-back
+# ──────────────────────────────────────────────────────────────
+- name: Restore MySQL data from prepared backup
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Run xtrabackup --copy-back
+      command: xtrabackup --copy-back --target-dir=/tmp/mysql-restore/backup/ --datadir=/var/lib/mysql
+      register: copy_back
+
+    - name: Verify copy-back completed OK
+      fail:
+        msg: >
+          xtrabackup --copy-back failed.
+          stdout: {{ copy_back.stdout_lines[-3:] | default(['(empty)']) | join('; ') }}
+          stderr: {{ copy_back.stderr_lines[-3:] | default(['(empty)']) | join('; ') }}
+      when: "'completed OK!' not in (copy_back.stdout | default('') + copy_back.stderr | default(''))"
+
+    - name: Set MySQL datadir ownership
+      file:
+        path: /var/lib/mysql
+        state: directory
+        recurse: true
+        owner: mysql
+        group: mysql
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 6: Start MySQL and verify data
+# ──────────────────────────────────────────────────────────────
+- name: Start MySQL and verify data integrity
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Start mysqld
+      systemd:
+        name: mysqld
+        state: started
+        enabled: true
+
+    - name: Wait for MySQL to be ready
+      wait_for:
+        port: 3306
+        state: started
+        timeout: 60
+
+    - name: Verify MySQL root login
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "SELECT VERSION();"
+      register: mysql_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Show MySQL version
+      debug:
+        msg: "MySQL version: {{ mysql_ver.stdout_lines | select('search', 'VERSION') | first | default('(unknown)') }}"
+
+    - name: List databases
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW DATABASES;"
+      register: mysql_databases
+      changed_when: false
+      failed_when: false
+
+    - name: Show databases
+      debug:
+        var: mysql_databases.stdout_lines
+
+    - name: Check shortlink data
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}'
+        -e "SELECT COUNT(*) AS total_urls FROM shortlink.urls;"
+      register: mysql_urls
+      changed_when: false
+      failed_when: false
+
+    - name: Show URL count
+      debug:
+        msg: "{{ mysql_urls.stdout_lines | default('(table not found)') }}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 7: Rebuild replication (GTID auto-positioning)
+# ──────────────────────────────────────────────────────────────
+- name: Rebuild MySQL replication
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check current replica status
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}'
+        -e "SHOW REPLICA STATUS\\G"
+      register: replica_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show replica status
+      debug:
+        var: replica_status.stdout_lines
+
+    - name: Stop replica if running
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "STOP REPLICA;"
+      changed_when: false
+      failed_when: false
+      when: replica_status.stdout is defined and replica_status.stdout | length > 0
+
+    - name: Reset replica metadata (clean slate from restored backup)
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "RESET REPLICA ALL;"
+      register: reset_replica
+      changed_when: reset_replica.rc == 0
+      failed_when: false
+
+    - name: Configure replication with GTID auto-positioning
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "
+          CHANGE REPLICATION SOURCE TO
+            SOURCE_HOST='{{ mysql_master_ip }}',
+            SOURCE_USER='{{ mysql_repl_user }}',
+            SOURCE_PASSWORD='{{ mysql_repl_password }}',
+            SOURCE_AUTO_POSITION=1,
+            GET_SOURCE_PUBLIC_KEY=1;
+        "
+      register: change_replica
+      changed_when: change_replica.rc == 0
+
+    - name: Start replica
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "START REPLICA;"
+      register: start_replica
+      changed_when: start_replica.rc == 0
+
+    - name: Wait for replication to stabilize
+      pause:
+        seconds: 5
+
+    - name: Verify replication status
+      command: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW REPLICA STATUS\\G"
+      register: replica_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Check IO and SQL threads
+      shell: >
+        mysql -u root -p'{{ mysql_root_password }}' -e "SHOW REPLICA STATUS\\G" 2>/dev/null
+        | grep -E "Replica_(IO|SQL)_Running"
+      register: thread_status
+      changed_when: false
+
+    - name: Show replication thread status
+      debug:
+        var: thread_status.stdout_lines
+
+    - name: Fail if replication not running
+      fail:
+        msg: "Replication not running! Check: Replica_IO_Running and Replica_SQL_Running should both be Yes."
+      when: >
+        thread_status.stdout is defined
+        and ('Replica_IO_Running: Yes' not in thread_status.stdout
+        or 'Replica_SQL_Running: Yes' not in thread_status.stdout)
+
+
+# ──────────────────────────────────────────────────────────────
+# Play 8: Summary
+# ──────────────────────────────────────────────────────────────
+- name: Display restore summary
+  hosts: node-03
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Show completion message
+      debug:
+        msg:
+          - "═══════════════════════════════════════════════════════"
+          - " MySQL restore completed on node-03"
+          - "═══════════════════════════════════════════════════════"
+          - ""
+          - " Restored from:     {{ backup_object | default('(see above)') }}"
+          - " MySQL version:     {{ mysql_ver.stdout_lines | select('search', 'VERSION') | first | default('(verify)') }}"
+          - " Shortlink URLs:    {{ mysql_urls.stdout_lines | select('search', 'total_urls') | first | default('(verify)') }}"
+          - " Replication:       {{ 'OK' if thread_status.stdout is defined and 'Replica_IO_Running: Yes' in thread_status.stdout and 'Replica_SQL_Running: Yes' in thread_status.stdout else 'CHECK' }}"
+          - ""
+          - " Old datadir:       /var/lib/mysql.pre-restore.*"
+          - " Temp files:        /tmp/mysql-restore/"
+          - ""
+          - " Verify manually:"
+          - "   mysql -u root -p'{{ mysql_root_password }}' -e \"SHOW REPLICA STATUS\\G\" 2>/dev/null"
+          - "   mysql -u root -p'{{ mysql_root_password }}' -e \"SELECT COUNT(*) FROM shortlink.urls;\" 2>/dev/null"
+          - "   curl http://<集群公网入口IP>/health"
+          - ""
+          - " To clean up:"
+          - "   rm -rf /tmp/mysql-restore/"
+          - "   rm -rf /var/lib/mysql.pre-restore.*"
+          - ""
+          - "═══════════════════════════════════════════════════════"
