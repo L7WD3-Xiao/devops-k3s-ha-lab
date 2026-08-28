@@ -79,11 +79,14 @@ Step 4: 主从复制 ──────► CHANGE REPLICATION → IO/SQL Running
     │
     ▼
 Step 5: 验证 ──────────► 数据插入 → Slave 同步 → GTID 一致
+    │
+    ▼
+Step 6: 延迟测量 ──────► Seconds_Behind_Master → pt-heartbeat 亚秒级实测
 ```
 
 ---
 
-### 实施步骤（5 步）
+### 实施步骤（6 步）
 
 #### Step 1: 配置 Ansible Inventory 与变量
 
@@ -333,6 +336,119 @@ ssh k3s-node-01 "mysql -h 192.168.1.229 -u root -p -e 'SHOW REPLICA STATUS\G'" |
 | Seconds_Behind_Master | 0 | `SHOW REPLICA STATUS` |
 | GTID 一致性 | Retrieved_Gtid_Set = Executed_Gtid_Set | `SHOW REPLICA STATUS` |
 | Master 写入 → Slave 同步 | < 2 秒 | 数据测试 |
+
+---
+
+#### Step 6: 测量实际主从延迟
+
+**目标**：Step 5 中的主从延迟只是估算值，本步骤用两种方案测量真实的复制延迟。
+
+**两种方案对比**：
+
+| 对比项 | 方案一：Seconds_Behind_Master | 方案二：Percona Toolkit (pt-heartbeat) |
+|--------|------------------------------|----------------------------------------|
+| 精度 | 秒级（< 1s 恒为 0） | 0.01s 亚秒级 |
+| 原理 | SQL 线程正在回放的事件时间戳与 Slave 当前时间之差 | Slave 本地时钟 − 心跳记录时间戳 |
+| 空闲表现 | 无新事件时恒为 0，测不出延迟 | 心跳持续写入，空闲也能测出 |
+| IO 线程积压 | IO 线程落后时仍可能显示 0 | 真实反映端到端延迟 |
+| 时钟依赖 | 依赖 Master/Slave NTP 同步 | 同样依赖 NTP |
+
+> ⚠️ `Seconds_Behind_Master` 的三个已知缺陷：① 粒度为整秒；② 取的是「正在回放的事件」的时间戳，IO 线程有积压但 SQL 线程追平事件队列时仍显示 0；③ 复制空闲时恒为 0，无法证明延迟真的为 0。生产环境建议用 pt-heartbeat 做真实延迟监控。
+
+**方案一：Seconds_Behind_Master（秒级粗估）**
+
+```bash
+# 持续采样 10 次，每次间隔 1 秒，观察数值是否稳定为 0
+ssh k3s-node-01 "for i in \$(seq 1 10); do \
+  mysql -h 192.168.1.229 -u root -p -e 'SHOW REPLICA STATUS\G' | grep -i Seconds_Behind; \
+  sleep 1; \
+done"
+```
+
+**方案二：pt-heartbeat（亚秒级实测）**
+
+原理：pt-heartbeat 在 Master 上每秒向 heartbeat 表 `UPDATE` 一次当前时间戳，该记录随复制流同步到 Slave；监控端在 Slave 上读出该时间戳并用**本地时钟**相减，得到端到端的真实延迟。
+
+**1. 安装 Percona Toolkit（node-01 运维节点）**：
+
+```bash
+# 安装 Percona yum 源并启用 tools 仓库
+ssh k3s-node-01 "sudo yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm"
+ssh k3s-node-01 "sudo percona-release enable tools release"
+ssh k3s-node-01 "sudo yum install -y percona-toolkit"
+
+# 确认安装成功
+ssh k3s-node-01 "pt-heartbeat --version"
+# 预期：pt-heartbeat 3.x.x
+```
+
+> 若 node-01 为 Debian/Ubuntu 系：`sudo apt-get install -y percona-toolkit`（仓库版本可能偏旧，可改用 Percona 官方 apt 源）。
+
+**2. Master 侧启动心跳写入**：
+
+```bash
+# 创建 heartbeat 表（--create-table 自动建库表）并以后台进程持续写入，默认每 1s 一次
+ssh k3s-node-01 "pt-heartbeat -h 192.168.1.230 -u root -p \
+  --database percona --table heartbeat --create-table --update --daemonize"
+
+# 确认心跳进程存在
+ssh k3s-node-01 "ps aux | grep '[p]t-heartbeat'"
+```
+
+**3. Slave 侧监控真实延迟**：
+
+```bash
+# 持续监控模式（1s 刷新，Ctrl+C 退出）
+ssh k3s-node-01 "pt-heartbeat -h 192.168.1.229 -u root -p \
+  --database percona --table heartbeat --monitor"
+
+# 输出示例：当前延迟 [ 1min 均值, 5min 均值, 15min 均值 ]
+# 0.01s [  0.01s,  0.00s,  0.00s ]
+
+# 单次检查模式（适合脚本/定时任务采集）
+ssh k3s-node-01 "pt-heartbeat -h 192.168.1.229 -u root -p \
+  --database percona --table heartbeat --check"
+# 预期：输出单个延迟数值，如 0.01
+```
+
+**4. 写入压力下的延迟观察（可选）**：
+
+```bash
+# Master 上持续批量写入，制造复制压力
+ssh k3s-node-01 "mysql -h 192.168.1.230 -u root -p -e '
+  CREATE DATABASE IF NOT EXISTS test_repl;
+  CREATE TABLE test_repl.load_test (id INT AUTO_INCREMENT PRIMARY KEY, msg VARCHAR(50));
+'"
+
+# 循环写入 1000 行（可调大批量放大延迟）
+ssh k3s-node-01 "for i in \$(seq 1 1000); do \
+  mysql -h 192.168.1.230 -u root -p -e \
+    'INSERT INTO test_repl.load_test (msg) VALUES (\"load-test\")'; \
+done"
+
+# 同时另开终端观察 --monitor 输出，预期：延迟短暂上升后回落到 0
+```
+
+**5. 停止心跳并清理**：
+
+```bash
+# 停止心跳后台进程
+ssh k3s-node-01 "pkill -f 'pt-heartbeat.*--update'"
+
+# 清理测试库（heartbeat 表随复制同步删除）
+ssh k3s-node-01 "mysql -h 192.168.1.230 -u root -p -e 'DROP DATABASE percona; DROP DATABASE test_repl'"
+```
+
+> ⚠️ **心跳进程需常驻**：`--update` 进程停止后，Slave 端读到的时间戳不再更新，`--monitor` 数值会虚增，因此 pt-heartbeat 作为长期监控手段时需将 Master 侧进程注册为 systemd 服务或常驻进程；一次性验证完成即停。
+
+**验证指标**：
+
+| 检查项 | 预期结果 | 验证方式 |
+|--------|---------|---------|
+| Seconds_Behind_Master 采样 | 10 次采样全部为 0 | `SHOW REPLICA STATUS` 循环采样 |
+| pt-heartbeat 当前延迟 | < 0.5s（空闲时 ~0.01s） | `--monitor` 输出首位 |
+| 均值收敛 | 1min/5min 均值 ≤ 当前延迟 | `--monitor` 输出方括号内 |
+| 压力写入后恢复 | 延迟短暂上升，停止写入后回落至 ~0 | 写入压力 + `--monitor` 对比 |
 
 ---
 
