@@ -659,22 +659,34 @@ Step 4: 验证 ────────────► 读写分离(read→Slave
 
 **目标**：在 MySQL Master 上创建 Orchestrator 拓扑管理用户、ProxySQL 监控用户，确保应用数据库 `shortlink` 已就绪。
 
-**操作**（在 Master 192.168.1.230 上执行）：
+**操作**（在 Master 库所在节点上执行，**注意更改两处密码**）：
 
 ```sql
 -- Orchestrator 拓扑管理用户（SUPER + REPLICATION 权限）
-CREATE USER 'orchestrator'@'%' IDENTIFIED BY 'Orchestrator@2026!';
+CREATE USER 'orchestrator'@'%' IDENTIFIED BY '<CHANGE_ME>';
 GRANT SUPER, PROCESS, REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'orchestrator'@'%';
 GRANT ALL PRIVILEGES ON orchestrator.* TO 'orchestrator'@'%';
 
 -- ProxySQL 监控用户
-CREATE USER 'monitor'@'%' IDENTIFIED BY 'Monitor@2026!';
+CREATE USER 'monitor'@'%' IDENTIFIED BY '<CHANGE_ME>';
 GRANT USAGE, REPLICATION CLIENT ON *.* TO 'monitor'@'%';
 
 -- 应用用户（shortlink 服务使用）
 CREATE USER 'shortlink'@'192.168.1.%' IDENTIFIED BY '...';
 GRANT ALL PRIVILEGES ON shortlink.* TO 'shortlink'@'192.168.1.%';
 FLUSH PRIVILEGES;
+```
+
+然后立刻把密码配置到 Secret 中（node-01 上执行）：
+
+```bash
+# 创建 MySQL 密码 Secret
+sudo /usr/local/bin/k3s kubectl create secret generic mysql-credentials -n data-layer \
+  --from-literal=monitor-password='...' \
+  --from-literal=shortlink-password='...' \
+  --from-literal=orchestrator-password='...' \
+  --from-literal=proxysql-admin-password='admin' \
+  --from-literal=proxysql-radmin-password='radmin'
 ```
 
 **涉及 SQL 文件**：
@@ -716,7 +728,7 @@ mysql -h 192.168.1.230 -u shortlink -p -e "SELECT 1"
   "MySQLOrchestratorPort": 3306,
   "MySQLOrchestratorDatabase": "orchestrator",
   "MySQLOrchestratorUser": "orchestrator",
-  "MySQLOrchestratorPassword": "Orchestrator@2026!",
+  "MySQLOrchestratorPassword": "__ORCHESTRATOR_PASSWORD__",
   "DiscoverByShowSlaveHosts": false,
   "HostnameResolveMethod": "none",
   "InstancePollSeconds": 5,
@@ -734,6 +746,7 @@ mysql -h 192.168.1.230 -u shortlink -p -e "SELECT 1"
 | `DiscoverByShowSlaveHosts` | false | 通过 `SHOW PROCESSLIST` 发现 slave（而非 `SHOW SLAVE HOSTS`） |
 | `HostnameResolveMethod` | none | 不进行 DNS 反解，直接用 IP 地址 |
 | `Autorecovery` | true | 启用自动故障恢复 |
+| MySQLOrchestratorPassword | ORCHESTRATOR_PASSWORD | 占位符，使用 Secret配置并通过环境变量导入 |
 | 后端存储 | 复用 MySQL Master 的 `orchestrator` 库 | 不单独部署 MySQL 容器 |
 
 > ⚠️ 后端存储复用现有 MySQL Master，无需单独部署容器化的 MySQL。
@@ -807,11 +820,6 @@ VALUES (3, 1, '^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|REPLACE)', 1, 1
 **部署命令**：
 
 ```bash
-# 创建 MySQL 密码 Secret
-ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl create secret generic mysql-credentials -n data-layer \
-  --from-literal=monitor-password='Monitor@2026!' \
-  --from-literal=shortlink-password='...'"
-
 # 部署 ProxySQL
 ssh k3s-node-01 "sudo /usr/local/bin/k3s kubectl apply -f -" < k8s/data-layer/proxysql.yaml
 

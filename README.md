@@ -12,11 +12,12 @@
 <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
 </p>
 </div>
+
 ---
 
 ## 项目简介
 
-本项目完整搭建了一套**生产级 K3s 高可用集群**，集成 **FluxCD GitOps** 持续部署与 **GitHub Actions** 持续集成，运行一个 Go 短链服务（Shortlink）。
+本项目完整搭建了一套**面向生产级标准设计的 K3s 高可用集群**，集成 **FluxCD GitOps** 持续部署与 **GitHub Actions** 持续集成，运行一个 Go 短链服务（Shortlink）。
 
 > **定位**：面向 **DevOps / SRE 校招面试**的教学项目，覆盖容器化、Kubernetes、CI/CD、基础设施即代码等核心技能栈。
 

@@ -828,6 +828,16 @@ newTag: v1.0.7
 
 IUA 永久暂停（`spec.suspend: true`），ImageRepository + ImagePolicy 保留用于监控。
 
+> 备注：根据[官方文档](https://oneuptime.com/blog/post/2026-03-05-imageupdateautomation-update-strategy-flux/view#1)，`$imagepolicy` 注释标记可控制粒度：
+>
+> | 标记后缀 | 更新行为                           | 示例注释                                               |
+> | :------- | :--------------------------------- | :----------------------------------------------------- |
+> | 无后缀   | 替换**整个字段值**（完整镜像引用） | `# {"$imagepolicy": "flux-system:shortlink-app"}`      |
+> | `:tag`   | **仅替换标签（tag）部分**          | `# {"$imagepolicy": "flux-system:shortlink-app:tag"}`  |
+> | `:name`  | **仅替换镜像名（name）部分**       | `# {"$imagepolicy": "flux-system:shortlink-app:name"}` |
+>
+> 开发过程中采用的是无后缀方案，因此使用的是完整镜像引用。——2026.08.26
+
 ### 6.10 GitHub PAT scope 限制
 
 Classic PAT 如果没有 `workflow` scope，无法通过 API 修改 `.github/workflows/*` 文件。Git 命令行 push 不受影响，但 GitHub Actions 的某些自动化操作需要此 scope。

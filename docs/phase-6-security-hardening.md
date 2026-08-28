@@ -88,7 +88,7 @@
 | proxysql:2.7.2 | root | 无预置 | /var/lib/proxysql (emptyDir) | baseline (root) |
 | orchestrator:latest | root | 无预置 | 无持久写入 | baseline (root) |
 
-## 4. 实施步骤（9 步）
+## 4. 实施步骤（7 步）
 
 > 执行顺序严格按依赖关系排列：SecurityContext 必须在 PSS 之前部署，否则 Pod 会被 PSS 拒绝调度。
 
@@ -112,12 +112,6 @@ Step 6: NetworkPolicy ────────► 白名单网络隔离（最后
     │
     ▼
 Step 7: Trivy CI ─────────────► GitHub Actions 镜像扫描
-    │
-    ▼
-Step 8: ProxySQL 密码迁移 ────► ConfigMap 明文 → Secret + init container
-    │
-    ▼
-Step 9: 文档更新 ─────────────► 本文档 + README + git commit
 ```
 
 ---
@@ -466,68 +460,6 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 
 ---
 
-### Step 8: ProxySQL 管理员密码迁移
-
-**目标**：将 `admin:admin` 明文密码从 ConfigMap 迁移到 K8s Secret。
-
-**问题位置**：
-- `k8s/data-layer/proxysql.yaml` ConfigMap: `admin_credentials="admin:admin;radmin:radmin"`
-- `k8s/data-layer/orchestrator.yaml` ConfigMap: `"ProxySQLPassword": "admin"`
-
-**迁移方案**：复用现有 `__PLACEHOLDER__` → init container sed → Secret 模式。
-
-#### 8.1 修改 ConfigMap
-
-```yaml
-# proxysql.yaml — 修改前
-admin_credentials="admin:admin;radmin:radmin"
-# 修改后
-admin_credentials="admin:__PROXYSQL_ADMIN_PASSWORD__;radmin:__PROXYSQL_RADMIN_PASSWORD__"
-
-# orchestrator.yaml — 修改前
-"ProxySQLPassword": "admin"
-# 修改后
-"ProxySQLPassword": "__PROXYSQL_ADMIN_PASSWORD__"
-```
-
-#### 8.2 修改 init container
-
-**proxysql.yaml** `render-config` 的 sed 追加：
-```yaml
--e "s|__PROXYSQL_ADMIN_PASSWORD__|${PROXYSQL_ADMIN_PASSWORD}|g" \
--e "s|__PROXYSQL_RADMIN_PASSWORD__|${PROXYSQL_RADMIN_PASSWORD}|g" \
-```
-
-**orchestrator.yaml** `render-config` 的 sed 追加：
-```yaml
--e "s|__PROXYSQL_ADMIN_PASSWORD__|${PROXYSQL_ADMIN_PASSWORD}|g" \
-```
-
-两个 init container 的 `env` 各添加对应的 `secretKeyRef`。
-
-#### 8.3 更新 Secret
-
-`k8s/data-layer/secret.yaml.example` 添加：
-```yaml
-proxysql-admin-password: "CHANGE_ME"
-proxysql-radmin-password: "CHANGE_ME"
-```
-
-集群上手动更新 `mysql-credentials` Secret（添加两个新 key）。
-
-**验证**：
-```bash
-# ConfigMap 不再含明文密码
-kubectl get cm proxysql-config -n data-layer -o jsonpath='{.data.proxysql\.cnf\.template}' | grep admin
-# 应输出: admin:__PROXYSQL_ADMIN_PASSWORD__
-
-# ProxySQL 正常工作（用新密码）
-kubectl exec -n data-layer deploy/proxysql -- mysql -u admin -p'<NEW>' -h 127.0.0.1 -P 6032 -e "SELECT * FROM runtime_mysql_servers"
-
-# 短链服务功能正常
-curl http://116.62.168.245/health   # {"status":"ok"}
-```
-
 ## 5. 受影响文件总览
 
 ### 新建文件（7 个）
@@ -552,8 +484,8 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | `k8s/data-layer/namespace.yaml` | 3, 5 | PSS labels + ResourceQuota + LimitRange |
 | `k8s/data-layer/redis-statefulset.yaml` | 1, 2 | serviceAccountName + securityContext |
 | `k8s/data-layer/sentinel-statefulset.yaml` | 1, 2, 5 | SA + SC + init container resources |
-| `k8s/data-layer/proxysql.yaml` | 1, 2, 5, 8 | SA + SC + init resources + 密码迁移 |
-| `k8s/data-layer/orchestrator.yaml` | 1, 2, 5, 8 | SA + SC + init resources + 密码迁移 |
+| `k8s/data-layer/proxysql.yaml` | 1, 2, 5 | SA + SC + init resources |
+| `k8s/data-layer/orchestrator.yaml` | 1, 2, 5 | SA + SC + init resources |
 | `k8s/data-layer/secret.yaml.example` | 8 | 添加 proxysql 密码 key |
 | `k8s/data-layer/kustomization.yaml` | 1, 4, 6 | resources 添加 sa/rbac/networkpolicy |
 | `.github/workflows/build-deploy.yml` | 7 | 插入 Trivy 扫描步骤 |
@@ -574,8 +506,7 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 7. Step 5: 部署 Quota        → describe 验证
 8. Step 6: 部署 NetworkPolicy → 连通性测试
 9. Step 7: 修改 CI workflow   → push 触发验证
-10. Step 8: ProxySQL 密码迁移 → 集群 Secret 更新 + 功能验证
-11. Step 9: 文档 + commit
+10. Step 9: 文档 + commit
 ```
 
 ### 回滚策略
@@ -586,7 +517,6 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | SecurityContext | git revert，恢复 SC 为 null |
 | NetworkPolicy | `kubectl delete networkpolicy --all -n app-layer; -n data-layer` |
 | Trivy CI | git revert workflow |
-| ProxySQL 密码 | 保留旧配置备份，失败时重建 Pod 恢复旧配置 |
 
 ## 7. 风险与注意事项
 
@@ -610,7 +540,6 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | NetworkPolicy | 无（flux-system 除外） | 白名单隔离，12 条 allow 规则 |
 | SecurityContext | 无 | 非 root（app+redis）/ root+drop ALL（proxysql/orch） |
 | PSS | 无标签 | app-layer=restricted, data-layer=baseline |
-| 密钥管理 | ProxySQL admin 明文 | 全部走 Secret + init container |
 | 资源限制 | 无 | ResourceQuota + LimitRange + init container resources |
 | CI 安全 | 无扫描 | Trivy HIGH/CRITICAL 阻断 + SARIF |
 
