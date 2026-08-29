@@ -31,7 +31,7 @@
 - 任一节点故障控制面与业务均不中断。
 - MySQL 复制延迟 < 1s，Orchestrator 自动切换；Redis failover < 10s，原 key 可读。
 - CI/CD 全自动化，git push 到生产上线 ~ 4min。
-- 双链路备份到 OSS，7 天保留；MySQL 全量备份窗口 ~6min（10GB 规模）、恢复演练 RTO ~25min。
+- 双链路备份到 OSS，7 天保留；MySQL 全量备份窗口 ~ 6min（10GB 规模）、恢复演练 RTO ~ 25min。
 - 全链路 IaC——Terraform 基础设施 + Ansible 集群部署 + FluxCD GitOps——环境可一键复现。
 - 全站 HTTPS 加密，证书 90 天自动续签；数据库运维可观测，每周结构化巡检 + OSS 趋势留存。
 
@@ -307,6 +307,7 @@ GitOps 的核心优势：**回滚 = git revert**，不需要 kubectl rollout und
 3. Velero 的备份时间在 xtrabackup 之后半小时，确保 MySQL 备份先把数据送到 OSS，再备份 K8s 资源
 
 **恢复流程：**
+
 - **MySQL**：从 OSS 下载备份 → `xtrabackup --prepare`（应用 redo log）→ `xtrabackup --copy-back` → `chown mysql:mysql` → 启动 mysqld → GTID auto-positioning 重建复制。已写好 Ansible playbook 自动化
 - **K8s + Redis**：`velero restore create` → 自动重建 PVC → node-agent kopia 从 OSS 恢复数据到 PVC → Redis StatefulSet 启动恢复
 

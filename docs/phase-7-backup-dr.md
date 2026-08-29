@@ -1339,18 +1339,6 @@ kubectl delete restore drill-restore -n velero
 | `README.md` | Step 7 | Phase 7 状态更新 |
 | `.workbuddy/memory/MEMORY.md` | Step 7 | 进度更新 |
 
-### Git 提交历史（实施修复记录）
-
-```
-cba0d84 fix: xtrabackup 改用 /root/.my.cnf 认证 (避免 command-line 默认密码覆盖)
-1a3a1ab fix: OSS PutObject 兼容性 — 添加 checksumAlgorithm "" 禁用 AWS 未签名 Payload
-a16eb76 fix: OSS 需要 virtual hosted style (s3ForcePathStyle=false)
-d281701 fix: Velero server args 修正, 移除 v2 CLI 不存在 flags
-42ae84d fix: Velero 主容器添加 command + node-agent 挂载路径修正
-0897294 fix: Velero init 容器 mountPath 改为 /target (避免覆盖镜像 /plugins)
-37c31bb fix: Velero/node-agent pin node-01 (image pull) + 修复 node-agent entrypoint
-```
-
 ## 6. 实施顺序与依赖关系
 
 ```

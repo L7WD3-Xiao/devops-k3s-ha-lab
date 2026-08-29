@@ -52,16 +52,15 @@
             └───────────────────────┘
 ```
 
-**防御纵深 6 层**：
+**防御纵深 5 层**：
 
 | 层 | 技术手段 | 防护目标 |
 |----|---------|---------|
 | L1 网络隔离 | NetworkPolicy 白名单 | 限制 Pod 间流量，防止横向移动 |
 | L2 容器安全 | SecurityContext + PSS | 非 root 运行、drop capabilities、seccomp |
 | L3 身份认证 | RBAC (Role/RoleBinding) | 最小权限，避免 default SA 滥用 |
-| L4 密钥管理 | Secret + init container | 消除 ConfigMap 明文密码 |
-| L5 资源限制 | ResourceQuota + LimitRange | 防止资源耗尽型攻击 |
-| L6 CI 安全 | Trivy 镜像扫描 | 阻断含 HIGH/CRITICAL 漏洞的镜像部署 |
+| L4 资源限制 | ResourceQuota + LimitRange | 防止资源耗尽型攻击 |
+| L5 CI 安全 | Trivy 镜像扫描 | 阻断含 HIGH/CRITICAL 漏洞的镜像部署 |
 
 ## 3. 安全现状分析（加固前）
 
@@ -73,11 +72,10 @@
 | 2 | 无 NetworkPolicy（除 flux-system 自带），Pod 间无网络隔离 | 高 | 全集群 |
 | 3 | 无 SecurityContext，容器默认拥有全部 capabilities | 高 | 全部 5 个 workload |
 | 4 | Namespace 无 PSS 标签，不限制特权容器 | 中 | app-layer + data-layer |
-| 5 | ProxySQL admin 密码 `admin:admin` 明文写在 ConfigMap | 高 | data-layer/proxysql.yaml |
-| 6 | Orchestrator ConfigMap 中 ProxySQLPassword 明文 | 中 | data-layer/orchestrator.yaml |
-| 7 | 无 ResourceQuota/LimitRange，无资源总量限制 | 中 | app-layer + data-layer |
-| 8 | 3 个 init container 无 resources 字段 | 低 | sentinel/proxysql/orchestrator |
-| 9 | CI 无镜像安全扫描 | 中 | GitHub Actions |
+| 5 | Orchestrator ConfigMap 中 ProxySQLPassword 明文 | 中 | data-layer/orchestrator.yaml |
+| 6 | 无 ResourceQuota/LimitRange，无资源总量限制 | 中 | app-layer + data-layer |
+| 7 | 3 个 init container 无 resources 字段 | 低 | sentinel/proxysql/orchestrator |
+| 8 | CI 无镜像安全扫描 | 中 | GitHub Actions |
 
 ### 3.2 镜像用户模型分析
 
@@ -232,6 +230,7 @@ securityContext:
 同 ProxySQL 配置模式。`openarkcode/orchestrator:latest` 以 root 运行，无预置非 root 用户。
 
 **验证**：
+
 ```bash
 kubectl get pod -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].securityContext.runAsUser}{"\n"}{end}'
 kubectl get pods -A  # 全部 Running
@@ -297,6 +296,7 @@ Workload SA（shortlink-app, redis, proxysql, orchestrator）不调用 K8s API�
 | `k8s/data-layer/rbac.yaml` | 3 个 RoleBinding（redis/proxysql/orchestrator → view ClusterRole） |
 
 **app-developer Role 权限**：
+
 - `""`: pods, pods/log, pods/exec, services, configmaps, secrets, serviceaccounts — CRUD
 - `apps`: deployments, replicasets — CRUD
 - `networking.k8s.io`: ingresses, networkpolicies — CRUD
@@ -472,7 +472,6 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | `k8s/data-layer/sa.yaml` | Step 1 | ServiceAccounts |
 | `k8s/data-layer/rbac.yaml` | Step 4 | RoleBindings |
 | `k8s/data-layer/networkpolicy.yaml` | Step 6 | NetworkPolicy |
-| `docs/phase-6-security-hardening.md` | Step 9 | 本文档 |
 
 ### 修改文件（13 个）
 
@@ -486,11 +485,8 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 | `k8s/data-layer/sentinel-statefulset.yaml` | 1, 2, 5 | SA + SC + init container resources |
 | `k8s/data-layer/proxysql.yaml` | 1, 2, 5 | SA + SC + init resources |
 | `k8s/data-layer/orchestrator.yaml` | 1, 2, 5 | SA + SC + init resources |
-| `k8s/data-layer/secret.yaml.example` | 8 | 添加 proxysql 密码 key |
 | `k8s/data-layer/kustomization.yaml` | 1, 4, 6 | resources 添加 sa/rbac/networkpolicy |
 | `.github/workflows/build-deploy.yml` | 7 | 插入 Trivy 扫描步骤 |
-| `README.md` | 9 | Phase 6 状态更新 |
-| `overview.md` | 9 | 项目概览更新 |
 
 ## 6. 部署顺序与回滚
 
@@ -506,7 +502,6 @@ curl http://116.62.168.245/health   # {"status":"ok"}
 7. Step 5: 部署 Quota        → describe 验证
 8. Step 6: 部署 NetworkPolicy → 连通性测试
 9. Step 7: 修改 CI workflow   → push 触发验证
-10. Step 9: 文档 + commit
 ```
 
 ### 回滚策略
