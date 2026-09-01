@@ -288,6 +288,9 @@ kubectl get events -n data-layer --field-selector reason=FailedCreate  # 无事�
 
 Workload SA（shortlink-app, redis, proxysql, orchestrator）不调用 K8s API（使用 secretKeyRef 注入），绑定最小只读权限用于审计。
 
+> RBAC: Role-Based Access Control
+> SA: ServiceAccount（详见Step 1）
+
 #### 4.2 新建文件
 
 | 文件 | 内容 |

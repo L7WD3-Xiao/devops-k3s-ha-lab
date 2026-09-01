@@ -219,7 +219,7 @@ git push (app/ 或 Dockerfile 变更)
 
 ## 学习路线
 
-本项目按 5 个 Phase 递进构建，每阶段产出可独立验证：
+本项目按 9 个 Phase 递进构建，每阶段产出可独立验证：
 
 | Phase | 内容 | 关键产出 |
 |-------|------|---------|
@@ -231,6 +231,7 @@ git push (app/ 或 Dockerfile 变更)
 | **Phase 6** | 安全加固 | RBAC 权限分级 + NetworkPolicy + Trivy 镜像扫描 |
 | **Phase 7** | 备份容灾 | Velero 集群备份 + xtrabackup MySQL 异地备份 + 恢复演练 |
 | **Phase 8** | HTTPS + 数据库自动巡检 | cert-manager 自签 CA（私有 PKI）+ 7 维度 MySQL 自动巡检 → OSS 趋势留存 |
+| **Phase 9** | 高并发压测与容量评估 | k6 压测读/写/混合 QPS + P99，校准容量口径 |
 
 各 Phase 详细文档在 [`docs/`](docs/) 目录，包含完整的**踩坑记录**（涵盖国内网络环境下的各种实际问题）。
 

@@ -20,7 +20,7 @@
 **Action**
 
 - **IaC 与集群部署**。Terraform 分步创建 VPC、安全组、3 台 ECS 及 EIP，分步控制规避成本风险。Ansible 自动化部署 K3s 集群。
-- **数据层高可用**。MySQL 物理机 GTID 主从复制，Orchestrator 自动检测故障并提升 Slave，ProxySQL 基于 read_only 变量实现读写分离。Redis 1 主 2 从 StatefulSet + 3 Sentinel 哨兵集群，防反亲和跨节点分布，RDB+AOF 双持久化。
+- **数据层高可用**。MySQL 物理机 GTID 主从复制，Orchestrator 自动检测故障并提升 Slave，ProxySQL 基于 read_only 变量实现读写分离。Redis 1 主 2 从 StatefulSet + 3 Sentinel 哨兵集群，反亲和跨节点分布，RDB+AOF 双持久化。
 - **CI/CD 与 GitOps**。Go 多阶段构建至 7.5MB 最终镜像，非 root 用户运行。GitHub Actions 全自动流水线：go vet/test、docker buildx、push ACR、Trivy 扫描 HIGH/CRITICAL 阻断、sed 更新 Kustomize newTag、git commit 回推。FluxCD 6 个 controller 同步 Git 状态，漂移自动纠正。
 - **安全纵深**。6 个命名 ServiceAccount；三层 RBAC（admin/developer/viewer）；12 条 NetworkPolicy 白名单覆盖完整数据流；PSS 差异化——app-layer restricted（非 root + readOnlyRootFilesystem + drop ALL），data-layer baseline（兼容 root 镜像但 drop ALL + 禁止提权）；SecurityContext 覆盖全部 5 个 Workload；Trivy CI 集成，阻断含 HIGH/CRITICAL 漏洞的镜像入库。
 - **备份容灾**。Velero FSB（kopia）每日备份 K8s 资源与 Redis PVC 至阿里云 OSS；xtrabackup 在 Slave 节点流式全量备份 MySQL（stream=xbstream | gzip），通过 ossutil 推送 OSS。双备份维度异地保留 7 天，OSS Lifecycle Rule 自动清理。
@@ -611,5 +611,33 @@ FluxCD v2.9.2 的 ImageUpdateAutomation 有 Setters 策略 Bug，不管你设什
 **追问 4：凌晨 2 点的备份 cron 挂了，你怎么知道？** 现状的诚实回答：退出码和推送结果写进巡检报告，周报才能发现，滞后最多一周。正确做法是备份完成后立即校验产物：① OSS 对象存在且大小 > 历史最小值的 70%（防 gzip 出空包/半包）；② 定期恢复演练——**可恢复的备份才算备份**，校验"备份存在"只是及格线。企业里这是备份成功率 SLA + 告警。
 
 **追问 5：如果数据涨到备份超过 30min 窗口，和 Velero 重叠了怎么办？** 三个手段按序上：① Velero 窗口顺延（两套备份互不依赖，重叠只影响 OSS 带宽峰值，不会互相破坏）；② MySQL 改全量+增量（周全量 + `xtrabackup --incremental` 日增量，日备份降到分钟级）；③ 备份与上传流水线化（`xbstream | gzip | ossutil` 三段管道边备边传）。关键是先讲清"重叠不致命"，再讲优化顺序。
+
+---
+
+#### Q25: 这个 3 节点 2C4G 集群能抗多少并发/QPS？
+
+> 集群未配置监控体系、未压测，以下为**基于硬件 + 架构反推的工程估算**（误差可能 3~5 倍）。面试先说"估算口径 + 瓶颈推导"，再说"怎么实测校准"。实测方案已写入 [phase-9-load-testing.md](phase-9-load-testing.md)，压测后可把下表数字从"估算"升级为"实测"。
+
+**回答要点（结论先行）：**
+
+| 场景 | 估算 QPS | 主瓶颈 |
+|------|---------|--------|
+| 读路径 `GET /:code`（Redis 命中 ≥90%） | 2,000~4,000（常态 2 副本）；峰值 5,000~8,000（HPA 扩至 6 副本） | 应用 Pod CPU 限额（200m），不是 Redis |
+| 写路径 `POST /api/shorten` | 500~1,500 | MySQL 单主——一次请求 = INSERT + UPDATE 两笔写 |
+| 混合流量（约 9:1 读写） | about 2,000~3,000 | 整体量级 |
+| 同时处理中的并发请求 | 30~80（峰值乐观 100+） | Little's law：并发 ≈ QPS × 平均 RT |
+
+**估算依据（要能拆开讲）：**
+
+1. **应用层先被 CPU limit 锁死**：shortlink.yaml 里每个 Pod `limits.cpu=200m`（0.2 核），2 副本 = 0.4 核，HPA 最大 6 副本 = 1.2 核。Go + Gin 处理一次 Redis 命中的 GET 约 100~200µs CPU → 单 Pod 约 1~2k QPS。这是比节点 CPU 更硬的约束。
+2. **读路径不是 Redis 瓶颈**：Redis GET 内网约 0.5~1ms，2C4G 单主轻松支撑十万级 ops/s；缓存未命中才走 ProxySQL → MySQL Slave 点查（~1~3ms），也不卡。
+3. **写路径瓶颈在 MySQL 单主**：`POST /api/shorten` = INSERT → 自增 ID → Base62 → UPDATE（2 次写）+ Redis SET。2C4G 单主 autocommit 小表单条写约 1~3k TPS → 折合 shorten QPS 约 500~1,500。ProxySQL 单副本 + 应用连接池 `SetMaxOpenConns(20)` × 2 Pod = 40 连接，写多时先排队。
+4. **集群实际可用资源低于纸面**：3 节点全跑 K3s server（embedded etcd）+ Traefik + FluxCD + Velero + cert-manager + 数据层 Pod（Redis×3、Sentinel×3、ProxySQL、Orchestrator），每节点留给应用的约 1~1.5 核 / 1.5~2GB。
+
+**追问 1：这个数怎么算出来的？** Little's law：并发数 = QPS × 平均响应时间。比如 2,000 QPS × 5ms ≈ 10 个在途请求；到瓶颈附近 RT 上涨，在途会堆到几十上百。所以"并发 30~80"是饱和前的合理区间，不是压测稳态值。
+
+**追问 2：怎么验证/校准？** 不用上监控体系，30 分钟出数：node-01 装 k6，读路径打 `GET /:code`（预置一批短码），写路径用 k6 脚本打 `POST /api/shorten`；同时 `kubectl top pod -n app-layer` 观察 shortlink Pod 是否顶到 200m 限额。k6 的 summary 直接输出精确 p(99)，不需要近似——实测永远比估算有说服力（完整方案见 phase-9 文档）。
+
+**追问 3：瓶颈怎么破？** 按序：① 放开 shortlink CPU limit 到 500m~1C（Gin 是 CPU 密集）并配合 HPA；② 写路径合并为单条 INSERT（先算好 Base62 再插入，省一次 UPDATE）——应用层最值得的优化；③ MySQL 开并行复制 + ProxySQL 调连接池；④ 再往上不是这台集群的活了，要拆 Redis Cluster / 上 RDS。面试主动讲"先量后调"，比背参数体面得多。
 
 ---
