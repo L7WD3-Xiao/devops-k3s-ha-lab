@@ -51,8 +51,8 @@
 
 K3s 是经过 CNCF 认证的 K8s 发行版，API 完全兼容，写在简历上就是"K8s 体系"。选 K3s 的原因：
 
-1. **资源友好**：3 节点中有一台仅 2C2G，标准 K8s 控制面组件（kube-apiserver、kube-controller-manager、kube-scheduler、etcd）占用 ~1GB+ 内存，K3s 单二进制整合全部控制面组件，实测 idle 时 ~400MB。相同硬件能跑业务 Pod。
-2. **内置组件省心**：Flannel、CoreDNS、Traefik Ingress、local-path-provisioner 全部内建，无需额外安装。Metrics-server 也是内建可选。
+1. **资源友好**：3 节点规格 2C4G，标准 K8s 控制面组件（kube-apiserver、kube-controller-manager、kube-scheduler、etcd）占用 ~1GB+ 内存，K3s 单二进制整合全部控制面组件，实测 idle 时 ~400MB。相同硬件能跑业务 Pod。
+2. **内置组件**：Flannel、CoreDNS、Traefik Ingress、local-path-provisioner 全部内建，无需额外安装。Metrics-server 也是内建可选。
 3. **embedded etcd**：3 节点用嵌入 etcd 而非外部 etcd 集群，少维护一套 etcd 集群，降低复杂度。
 4. **与 K8s 概念完全一致**：kubectl、Pod、Service、Deployment、CRD、Operator 完全兼容，学了 K3s 就是学 K8s，不存在迁移成本。
 
@@ -76,8 +76,6 @@ K3s embedded etcd 使用 Raft 共识算法，需要多数节点存活。3 节点
 
 #### Q3: MySQL 为什么不放容器里，放物理机？Redis 为什么又放容器里？
 
-**这是你项目最大的亮点问题，中厂面试官一定会问。**
-
 **回答要点：**
 
 核心原则：**有状态服务容器化与否取决于运维成本和收益的权衡。**
@@ -90,7 +88,13 @@ K3s embedded etcd 使用 Raft 共识算法，需要多数节点存活。3 节点
 | 备份方案 | xtrabackup 需要读数据目录 | 主从复制 + RDB/AOF 即可 |
 | 故障恢复 | 数据修复时间长 | Pod 重建 + 从节点同步 |
 
-MySQL 放物理机是中厂生产常见模式——核心数据需要可控的 I/O 性能、确定的备份路径、以及 DBA 熟悉的运维方式。Redis 容器化是因为它是无状态缓存层的语义（数据可重建），且容器化后便于利用 K8s 的滚动更新和健康检查做自动恢复。
+MySQL 放物理机是中厂生产常见模式：
+
+- 核心数据需要可控的 I/O 性能、
+- 确定的备份路径、
+- 以及 DBA 熟悉的运维方式。
+
+Redis 容器化是因为它是无状态缓存层的语义（数据可重建），且容器化后便于利用 K8s 的滚动更新和健康检查做自动恢复。
 
 **追问：如果 MySQL 数据量大到 100G 甚至 1T，物理机方案还成立吗？** 那时候物理机也会遇到单机瓶颈，会用 RDS 或者分布式数据库。校招项目里展示你在小规模下能按正确原则做决策就足够了。
 
@@ -100,7 +104,7 @@ MySQL 放物理机是中厂生产常见模式——核心数据需要可控的 I
 
 **回答要点：**
 
-1. **资源占用**：FluxCD 用自定义控制器而非 API Server 轮询，资源占用量更低（实测 6 个 controller 约 200MB）。ArgoCD 需要 Redis + Application Controller + API Server + Dex，资源消耗约 FluxCD 的 2-3 倍。对 2C2G 节点来说，这个差异很明显。
+1. **资源占用**：FluxCD 用自定义控制器而非 API Server 轮询，资源占用量更低（实测 6 个 controller 约 200MB）。ArgoCD 需要 Redis + Application Controller + API Server + Dex，资源消耗约 FluxCD 的 2-3 倍。
 2. **更纯粹的 GitOps**：FluxCD 的设计哲学是"K8s 控制器被动监听 Git"，不需要手动点击 Sync 按钮。ArgoCD 更偏向"Web UI + 手动触发"，虽然也可以自动化但设计初衷不同。
 3. **部署简单**：FluxCD 单二进制部署（flux install），ArgoCD 需要更多 CRD 和组件。
 
@@ -212,8 +216,6 @@ initContainers:
     10. 滚动更新完成
 ```
 
-**镜像更新策略：** 原先用 FluxCD ImageUpdateAutomation（IUA）自动扫描 ACR 新 tag，但 v2.9.2 的 Setters 策略有 Bug——把完整的镜像引用写成 newTag 而不是只写 tag，导致 Kustomize 渲染出损坏的镜像地址。最终改为 **CI 直接 sed 更新 newTag + git push**，IUA 永久暂停。
-
 **追问：为什么不用 Kustomize 的 images 字段的 digest pinning？** digest pinning 的好处是不可变部署、防篡改。但我们的 CI workflow 已经是信任链的一部分（代码审查 + Trivy 扫描后才推送），用 semver tag + 滚动更新更符合我们的部署节奏。而且 CI 会处理新 tag 的注入，不需要人工操作。
 
 ---
@@ -230,7 +232,7 @@ initContainers:
 | 漂移纠正 | 手动改集群资源 → FluxCD 自动恢复 | ~5min（prune: true） |
 | FluxCD 故障 | 手动 `flux reconcile kustomization app-layer` | 立即触发 |
 
-GitOps 的核心优势：**回滚 = git revert**，不需要 kubectl rollout undo，不需要重新构建镜像。你只需要在 Git 里回退，FluxCD 会自动把集群恢复到上一个状态。
+GitOps 的核心优势：**回滚 = git revert**，不需要 kubectl rollout undo，不需要重新构建镜像。只需要在 Git 里回退，FluxCD 会自动把集群恢复到上一个状态。
 
 **追问：如果 git revert 之后 CI 又跑了怎么办？** 这是个好问题。我们的 CI 只会在 `app/` 或 `Dockerfile` 变更时触发。revert 操作修改的是 `k8s/app-layer/kustomization.yaml`，不会触发 CI。如果要回滚代码，revert 代码变更 + 修改 kustomization.yaml 的 tag 到旧版本，然后把这两个 commit push 上去。
 

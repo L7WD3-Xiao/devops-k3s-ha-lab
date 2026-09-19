@@ -286,113 +286,19 @@ endpoint = {{ oss_endpoint }}
 #
 # Cron: 0 2 * * * /usr/local/bin/xtrabackup-backup.sh >> /var/log/xtrabackup-backup.log 2>&1
 
-set -euo pipefail
-
-# ── Configuration ─────────────────────────────────────────────
-MYSQL_USER="${MYSQL_USER:-root}"
-# 密码由 /root/.my.cnf [client] 提供 (host=127.0.0.1 user=root password=XXX)
-# 脚本不传 --password 以防覆盖 my.cnf 配置
-MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
-BACKUP_DIR="${BACKUP_DIR:-/data/backups/mysql}"
-OSS_BUCKET="${OSS_BUCKET:-k3s-backup-velero}"
-OSS_PREFIX="${OSS_PREFIX:-mysql-backups}"
-OSSUTIL_BIN="${OSSUTIL_BIN:-/usr/local/bin/ossutil}"
-OSS_ENDPOINT="${OSS_ENDPOINT:-oss-cn-hangzhou-internal.aliyuncs.com}"
-RETENTION_DAYS="${RETENTION_DAYS:-7}"
-DATE="$(date +%Y%m%d-%H%M%S)"
-BACKUP_NAME="mysql-full-${DATE}"
-BACKUP_FILE="${BACKUP_DIR}/${BACKUP_NAME}.xbstream.gz"
-
-# ── Dry-run ────────────────────────────────────────────────────
-if [ "${1:-}" = "--dry-run" ]; then
-    echo "[DRY-RUN] xtrabackup-backup.sh"
-    echo "  MYSQL_USER=${MYSQL_USER}"
-    echo "  BACKUP_DIR=${BACKUP_DIR}"
-    echo "  OSS_BUCKET=${OSS_BUCKET}"
-    echo "  OSS_PREFIX=${OSS_PREFIX}"
-    echo "  OSS_ENDPOINT=${OSS_ENDPOINT}"
-    echo "  RETENTION_DAYS=${RETENTION_DAYS}"
-    echo "  BACKUP_FILE=${BACKUP_FILE}"
-    echo ""
-    echo "  Would run: xtrabackup --backup --stream=xbstream ... | gzip > ${BACKUP_FILE}"
-    echo "  Would push: ossutil cp ${BACKUP_FILE} oss://${OSS_BUCKET}/${OSS_PREFIX}/"
-    echo "  Would clean: find ${BACKUP_DIR} -name 'mysql-full-*.xbstream.gz' -mtime +${RETENTION_DAYS} -delete"
-    exit 0
-fi
-
 # ── Pre-flight checks ────────────────────────────────────────
-if ! command -v xtrabackup &>/dev/null; then
-    echo "FATAL: xtrabackup not found. Install percona-xtrabackup-80 first."
-    exit 1
-fi
-
-if ! command -v "${OSSUTIL_BIN}" &>/dev/null; then
-    echo "FATAL: ossutil not found at ${OSSUTIL_BIN}. Install ossutil first."
-    exit 1
-fi
-
-if ! mysqladmin ping --silent 2>/dev/null; then
-    echo "WARNING: MySQL not reachable. Check /root/.my.cnf credentials."
-    exit 1
-fi
-
-mkdir -p "${BACKUP_DIR}"
-
 # Check available disk space (warn if < 5G)
-AVAIL_KB=$(df "${BACKUP_DIR}" | tail -1 | awk '{print $4}')
-if [ "${AVAIL_KB}" -lt 5242880 ]; then
-    echo "WARNING: Low disk space in ${BACKUP_DIR}: $((AVAIL_KB / 1024))M available"
-fi
-
 # ── Backup ─────────────────────────────────────────────────────
 # 流式备份直接写入压缩文件 (无中间暂存)
 # --slave-info: 记录 relay log 位置 (replica 备份)
 # --no-lock: Slave 只读 (super_read_only=ON), 安全无需锁
 # --safe-slave-backup: 暂停 SQL 线程确保 binlog 位置与备份一致
 # 密码通过 /root/.my.cnf [client] user=root password=XXX 提供
-
-echo "--- Starting xtrabackup: ${BACKUP_NAME} ---"
-# 密码由 /root/.my.cnf [client] host=127.0.0.1 user=root password=XXX 提供
-# 不传 --user/--password 以防覆盖 my.cnf 配置
-xtrabackup --backup \
-  --stream=xbstream \
-  --slave-info \
-  --no-lock \
-  --safe-slave-backup \
-  | gzip > "${BACKUP_FILE}"
-
 # ── Verify backup ─────────────────────────────────────────────
-BACKUP_SIZE=$(stat -c%s "${BACKUP_FILE}" 2>/dev/null || stat -f%z "${BACKUP_FILE}" 2>/dev/null || echo "0")
-if [ "${BACKUP_SIZE}" -eq 0 ]; then
-    echo "FATAL: Backup file is empty: ${BACKUP_FILE}"
-    rm -f "${BACKUP_FILE}"
-    exit 1
-fi
-echo "Backup file size: $(du -h "${BACKUP_FILE}" | cut -f1)"
-
 # ── Push to OSS ───────────────────────────────────────────────
-echo "--- Uploading to OSS: ${OSS_BUCKET}/${OSS_PREFIX}/ ---"
-"${OSSUTIL_BIN}" cp "${BACKUP_FILE}" \
-  "oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${BACKUP_FILE}")" \
-  -e "${OSS_ENDPOINT}"
-
 # ── Cleanup old local backups ─────────────────────────────────
 # 保留本地最近 2 份 (快速恢复), OSS Lifecycle Rule 处理远端 7 天清理
-echo "--- Cleaning up local backups older than ${RETENTION_DAYS} days ---"
-find "${BACKUP_DIR}" -name "mysql-full-*.xbstream.gz" -mtime +${RETENTION_DAYS} -delete
-
 # ── Summary ───────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " MySQL backup complete!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo " Backup name:    ${BACKUP_NAME}"
-echo " Local file:     ${BACKUP_FILE}"
-echo " Local size:     $(du -h "${BACKUP_FILE}" | cut -f1)"
-echo " OSS location:   oss://${OSS_BUCKET}/${OSS_PREFIX}/$(basename "${BACKUP_FILE}")"
-echo " Retention:      ${RETENTION_DAYS} days (OSS lifecycle rule)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ```
 
 #### 2.5 验证
@@ -923,6 +829,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 ```
 
 **Play 1：校验前提** (hosts: localhost, connection: local)
+
 - Assert `mysql_root_password` 已设置
 - Assert OSS 变量已设置
 
@@ -932,6 +839,7 @@ ssh -J k3s-node-01 ops@192.168.1.229 "sudo /usr/local/bin/ossutil ls oss://k3s-b
 - 如未指定 `backup_name`，自动选择最新的
 
 **Play 3：下载 + 准备备份** (hosts: node-03, become: true)
+
 - 创建恢复目录（含 cleanup 步骤，`xbstream` 不覆盖已存在文件）
 - 下载：`ossutil cp -f oss://.../{backup_name}.xbstream.gz /tmp/mysql-restore/`（`-f` 防止文件已存在时交互式询问覆盖导致非 TTY 挂起）
 - 解压：`gunzip -c ... | xbstream -x -C /tmp/mysql-restore/backup/`
@@ -1342,7 +1250,7 @@ kubectl delete restore drill-restore -n velero
 ## 6. 实施顺序与依赖关系
 
 ```
-Step 1: OSS 基础设施 (手动) ─────────────────────┐
+Step 1: OSS 基础设施 (手动) ───────────────────────┐
          │                                       │
          ├──► Step 2: xtrabackup ──► Step 4: MySQL 恢复
          │         (Ansible + 脚本)       (Ansible playbook)

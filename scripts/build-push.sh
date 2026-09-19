@@ -25,11 +25,11 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
 # K3s pulls via VPC domain (free); local push uses public domain
-ACR_REGISTRY="${ACR_REGISTRY}"
-ACR_REGISTRY_PUBLIC="${ACR_REGISTRY_PUBLIC}"
+ACR_REGISTRY="${ACR_REGISTRY:-}"
+ACR_REGISTRY_PUBLIC="${ACR_REGISTRY_PUBLIC:-}"
 ACR_NAMESPACE="${ACR_NAMESPACE:-shortlink123}"
 ACR_REPOSITORY="${ACR_REPOSITORY:-shortlink-app}"
-ACR_USERNAME="${ACR_USERNAME}"
+ACR_USERNAME="${ACR_USERNAME:-}"
 
 # Daocloud mirror for Docker Hub (China — auth.docker.io is blocked)
 DAOLOUD_PREFIX="docker.m.daocloud.io/library"

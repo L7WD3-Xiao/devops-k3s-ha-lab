@@ -214,7 +214,18 @@ ssh -T git@github.com   # → "Hi L7WD3! You've successfully authenticated"
 
 ---
 
-#### 0.3 生成并提交 go.sum（验证清单 #7）
+**0.3 为 CD 配置仓库访问令牌**
+
+需要使用 FluxCD 更新仓库配置中的版本号，因此要给予 FluxCD 仓库写权限
+
+- 登录 GitHub，点击右上角头像 -> **Settings** -> **Developer Settings**；
+- 选择 **Personal access tokens** -> **Classic Tokens**；
+- 点击 **Generate new token**；
+- **Expiration**：设置 30 天后过期
+- **Select scopes**：选择 **Repo**；
+- 点击底部 **Generate token** 生成令牌并**立即复制保存**。
+
+#### 0.4 生成并提交 go.sum（验证清单 #7）
 
 CI 中 `go vet` 需要完整的 `go.sum` 文件。不能在 nerdctl 构建容器内执行（网络不通），也不能直接查询 `sum.golang.org`（返回的哈希不全）。必须在有代理的主机上用 Go 二进制直接生成：
 
